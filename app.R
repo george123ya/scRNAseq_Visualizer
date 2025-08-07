@@ -1,7 +1,7 @@
 # ==============================================================================
 # Enhanced scRNA-seq Interactive Visualizer
 # ==============================================================================
-# A sophisticated Shiny application for visualizing single-cell RNA sequencing
+# A Shiny application for visualizing single-cell RNA sequencing
 # data with dynamic gene expression, multi-annotation support, and advanced
 # analysis tools including MAGIC imputation, differential expression, and
 # differential abundance testing.
@@ -50,8 +50,8 @@ source("global.R")
 
 # Configure Python environment for scanpy/anndata
 
-use_condaenv("sc_rna_env_python2", required = TRUE)
-# use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
+# use_condaenv("sc_rna_env_python2", required = TRUE)
+use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
 
 
 # ==============================================================================
