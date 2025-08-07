@@ -1,27 +1,17 @@
 # scRNA-seq Shiny App
 
-A lightweight Shiny application for visualizing single-cell RNA-seq data stored in `.h5ad` format, using Python's `anndata` via `reticulate`.
-
-## 🧰 Features
-
-* Load and explore `.h5ad` files with UMAP/plotly visualizations
-* Powered by `reticulate`, `anndata`, and `scanpy` (Python), and `shiny`, `plotly`, and `patchwork` (R)
-* Dockerized for easy deployment
+A Shiny application for visualizing single-cell RNA-seq data stored in `.h5ad` format, using Python's `anndata` via `reticulate`. Now powered by WebGL for fast rendering and exploration.
 
 ---
 
-## 📁 Project Structure
+## 🧰 Features
 
-```
-.
-├── app.R                      # Main Shiny app
-├── processed_data/           # Processed .h5ad files
-│   └── pbmc10k_subset.h5ad   # Subsampled example
-├── yml/
-│   └── shiny_app_env.yml     # Conda environment for app
-├── Dockerfile                # For reproducible container builds
-└── README.md
-```
+* 📊 Interactive UMAP visualization using [**`regl-scatterplot`**](https://github.com/flekschas/regl-scatterplot) (WebGL)
+* 🎯 Dynamic subdivision of UMAPs by **gene expression** (select multiple genes and compare side-by-side)
+* ✨ MAGIC Imputation support with **animated transitions** between raw and imputed coordinates
+* 🧠 Efficient memory usage for large datasets
+* 🔗 Integrates `reticulate`, `anndata`, `scanpy`, and `MAGIC` (Python), with `shiny` and `regl-scatterplot` (R/JS)
+* 🐳 Dockerized for reproducible and portable deployment
 
 ---
 
@@ -48,7 +38,7 @@ Then open your browser at [http://localhost:3838](http://localhost:3838)
 If you'd like to run directly:
 
 ```bash
-Rscript app.R
+R -e "shiny::runApp('.', port = 3838)"
 ```
 
 Make sure the conda env is activated, or manually call:
@@ -61,21 +51,30 @@ reticulate::use_condaenv("shiny_app_env", required = TRUE)
 
 ## 📦 Dependencies
 
-### R (installed via conda)
+### R (via conda)
 
-* `shiny`, `reticulate`, `plotly`, `dplyr`, `patchwork`, `cowplot`
+* `shiny`, `reticulate`, `dplyr`, `jsonlite`, `shinyjs`
 
-### Python (inside conda env)
+### Python (via conda)
 
-* `anndata`, `scanpy`, `rpy2`, etc.
+* `anndata`, `scanpy`, `magic-impute`, `rpy2`, `numpy`, `pandas`
 
-See [`shiny_app_env.yml`](yml/shiny_app_env.yml) for details.
+See [`shiny_app_env.yml`](yml/shiny_app_env.yml) for full environment details.
+
+---
+
+## 🧪 Advanced Features
+
+* **Gene Expression Viewer** — select multiple genes and view UMAPs side-by-side
+* **MAGIC Coordinate Toggle** — seamlessly animate between raw and imputed UMAP layouts
+* **Memory Optimization** — lazy-loading and efficient plotting of large datasets (in developemnt)
+* **Custom WebGL rendering** — using `regl-scatterplot` with support for interactivity (hover, lasso/box select)
 
 ---
 
 ## 📬 Contact
 
-For questions, issues or suggestions, feel free to open an [Issue](https://github.com/yourusername/scrna-shiny-app/issues).
+For questions, issues or suggestions, feel free to open an [Issue](https://github.com/george123ya/scRNAseq_Visualizer/issues).
 
 ---
 
