@@ -1,0 +1,24 @@
+name: shiny_app_env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.8
+  - r-base
+  - r-shiny
+  - r-shinyjs
+  - r-shinydashboard
+  - r-dt
+  - r-plotly
+  - r-dplyr
+  - r-jsonlite
+  - r-viridislite
+  - r-colorspace
+  - r-reticulate
+  - r-base64enc
+  - r-patchwork
+  - r-cowplot
+  - pip
+  - zlib 
+  - pip:
+      - anndata
+      - rpy2

@@ -1,0 +1,7 @@
+# Don't copy large or unnecessary files
+# processed_data/relaxed_epdsc_annotated_data.h5
+*.ipynb
+.yml/
+*.Rproj
+.git/
+.gitignore

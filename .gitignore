@@ -1,0 +1,31 @@
+# Python/R/conda stuff
+*.pyc
+.Rhistory
+.RData
+.Rproj.user/
+__pycache__/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Conda env folders
+.env/
+.venv/
+
+# H5AD files and matrix files
+*.h5ad
+*.mtx
+*.tsv
+*.txt
+*.gz
+*.tar
+*.h5
+
+# Data folders
+raw_data/
+
+# Ignore the folder and all its contents
+processed_data/
+
+# Shiny logs
+*.log

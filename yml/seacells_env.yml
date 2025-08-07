@@ -1,0 +1,28 @@
+name: seacells
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.8
+  - cython
+  - ipython
+  - numpy
+  - pandas=1.5.3        # ✅ Fijado para evitar error con is_categorical
+  - scanpy>=1.8.1,<1.9
+  - anndata
+  - numba>=0.51.2
+  - scipy>=1.5
+  - python-igraph
+  - loompy=3.0.6
+  - louvain>=0.6,!=0.6.2
+  - fa2
+  - leidenalg
+  - seaborn
+  - matplotlib=3.5.3    # ✅ Ya añadido antes para evitar conflicto de metaclases
+  - pip
+  - pip:
+      - pyranges
+      - dfply
+      - palantir
+      - git+https://github.com/dpeerlab/SEACells

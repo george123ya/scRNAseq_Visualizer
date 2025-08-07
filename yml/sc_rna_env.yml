@@ -1,0 +1,23 @@
+name: sc_rna_env_python
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - r-base
+  - ipykernel
+  - xz  # <-- this line fixes the lzma error
+  - pip
+  - pip:
+      - scanpy
+      - decorator
+      # - fa2
+      - PhenoGraph
+      - celltypist
+      - rpy2
+      - anndata2ri
+      - scrublet
+      - jupyterlab
+      - notebook
+      - scikit-misc
+
