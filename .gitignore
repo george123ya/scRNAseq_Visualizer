@@ -20,6 +20,8 @@ __pycache__/
 *.gz
 *.tar
 *.h5
+*.json
+*.jar
 
 # Data folders
 raw_data/

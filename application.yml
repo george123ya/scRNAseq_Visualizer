@@ -1,0 +1,4 @@
+proxy:
+  specs:
+    - id: scRNA-seq Browser
+      container-image: scrna-shiny-app

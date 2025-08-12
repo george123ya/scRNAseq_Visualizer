@@ -1,0 +1,448 @@
+# ==============================================================================
+# USER INTERFACE
+# ==============================================================================
+
+library(shinyjs)
+library(shiny)
+# library(shinydashboard)
+# library(DT)
+library(plotly)
+library(jsonlite)
+library(fontawesome)
+
+# ==============================================================================
+# Enhanced scRNA-seq Interactive Visualizer UI with QC Tab
+# ==============================================================================
+
+ui <- fluidPage(
+  theme = bslib::bs_theme(version = 4, bootswatch = "flatly"),
+  useShinyjs(),
+  
+  # Custom CSS styling
+  tags$head(
+    tags$script(src = "scatterplot.js"),
+    tags$link(rel = "stylesheet", type = "text/css", href = "styles.css"),
+    tags$style(HTML("
+      .nav-tabs .nav-link.active {
+        background-color: #007bff;
+        color: white;
+        border-color: #007bff;
+      }
+      .qc-metric-card {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 15px;
+      }
+      .qc-plot-container {
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 15px;
+      }
+      .metric-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #007bff;
+      }
+      .metric-label {
+        font-size: 14px;
+        color: #6c757d;
+        margin-top: 5px;
+      }
+      
+      /* Collapsible section styles */
+      .collapsible-section {
+        margin-bottom: 15px;
+        border-radius: 8px;
+        background: #f8f9fa;
+      }
+      
+      .collapsible-header {
+        padding: 0px 15px;
+        background: linear-gradient(135deg, #3a8dde, #007bff); /* smooth gradient */
+        color: white;
+        cursor: pointer;
+        border-radius: 10px 10px 0 0;
+        user-select: none;
+        font-weight: 600;
+        font-size: 15px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;  /* space between icon and text */
+        box-shadow: 0 2px 5px rgba(0, 123, 255, 0.3); /* subtle shadow */
+        transition: background 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .collapsible-header:hover {
+        background: linear-gradient(135deg, #2e7ad1, #0056b3);
+        box-shadow: 0 4px 10px rgba(0, 86, 179, 0.5);
+        }
+
+        .collapse-icon {
+        font-size: 16px;
+        transition: transform 0.3s ease;
+        display: inline-block;
+        color: white;
+        }
+
+        .collapse-icon.collapsed {
+        transform: rotate(-90deg);
+        }
+      
+        .collapsible-content {
+            padding: 15px;
+            border-radius: 0px 15px 15px 15px;
+            border: 1px solid #dee2e6;
+        }
+        
+        .section-header {
+            margin: 0;
+            font-size: 14px;
+            font-weight: 500;
+        }
+    "))
+  ),
+  
+  # Main Title Section
+  div(class = "main-title",
+    h1("🧬 scRNA-seq Browser"),
+  ),
+  
+    # Main Layout with Tabs
+    fluidRow(
+    # Sidebar Panel (always visible)
+    column(3,
+      # Dataset Selection - Always Expanded
+      div(class = "collapsible-section",
+        div(class = "collapsible-header", onclick = "toggleCollapse('dataset-section')",
+          span(class = "section-header", "📁 Dataset"),
+          span(class = "collapse-icon", "▼")
+        ),
+        div(id = "dataset-section", class = "collapsible-content",
+          uiOutput("datasetUI"),
+          tags$small(class = "text-muted", 
+            "Select your .h5ad file or use demo data for exploration")
+        )
+      ),
+      
+      # Status and Data Info - Collapsible
+      div(class = "collapsible-section",
+        div(class = "collapsible-header", onclick = "toggleCollapse('status-section')",
+          span(class = "section-header", "ℹ️ Data Information"),
+          span(class = "collapse-icon", "▼")
+        ),
+        div(id = "status-section", class = "collapsible-content",
+          div(id = "status-container",
+            textOutput("status")
+          ),
+          uiOutput("dataInfo")
+        )
+      ),
+      
+      # Tab-specific controls (conditionally shown)
+      conditionalPanel(
+        condition = "input.main_tabs == 'visualization'",
+        # Gene Search and Visualization - Collapsible
+        div(class = "collapsible-section",
+          div(class = "collapsible-header", onclick = "toggleCollapse('gene-section')",
+            span(class = "section-header", "🔬 Gene Expression"),
+            span(class = "collapse-icon", "▼")
+          ),
+          div(id = "gene-section", class = "collapsible-content",
+            uiOutput("geneSearchUI"),
+            uiOutput("colorByUI"),
+            div(class = "mt-2",
+              checkboxInput("activateMAGIC", 
+                HTML("<strong>🪄 MAGIC Imputation</strong>"), 
+                value = FALSE),
+              tags$small(class = "text-muted", 
+                "Note: For visualization only, not for statistical analysis")
+            )
+          )
+        )
+      ),
+      
+      # QC Tab Controls
+      conditionalPanel(
+        condition = "input.main_tabs == 'qc'",
+        div(class = "collapsible-section",
+          div(class = "collapsible-header", onclick = "toggleCollapse('qc-params-section')",
+            span(class = "section-header", "🔍 QC Parameters"),
+            span(class = "collapse-icon", "▼")
+          ),
+          div(id = "qc-params-section", class = "collapsible-content",
+            conditionalPanel(
+              condition = "input.qc_plot_type != 'scatter'",
+              uiOutput("qc_metric_ui"),
+              uiOutput("qc_group_by_ui")
+            ),
+
+            conditionalPanel(
+              condition = "input.qc_plot_type == 'scatter'",
+              uiOutput("qc_x_metric_ui"),
+              uiOutput("qc_y_metric_ui"),
+              uiOutput("qc_color_by_ui")
+            ),
+            
+            # Plot type selection
+            radioButtons("qc_plot_type", "Plot Type:",
+              choices = list(
+                "Violin Plot" = "violin",
+                "Box Plot" = "box",
+                "Histogram" = "histogram",
+                "Scatter Plot" = "scatter"
+              ),
+              selected = "violin",
+              inline = TRUE
+            ),
+
+            checkboxInput("qc_show_points", "Show individual points", value = TRUE),
+            checkboxInput("qc_log_scale", "Log scale (where applicable)", value = FALSE),
+            sliderInput("qc_point_size", "Point size:", 
+              min = 0.1, max = 2, value = 0.5, step = 0.1)
+          )
+        )
+      ),
+
+      # Tools Tab Controls
+      conditionalPanel(
+        condition = "input.main_tabs == 'results'",
+        # Gene Set Signature - Collapsible
+        div(class = "collapsible-section",
+          div(class = "collapsible-header", onclick = "toggleCollapse('gene-set-section')",
+            span(class = "section-header", "📊 Gene Set Signature"),
+            span(class = "collapse-icon collapsed", "▼")
+          ),
+          div(id = "gene-set-section", class = "collapsible-content", style = "display: none;",
+            checkboxInput("show_gene_set", 
+              HTML("<strong>Enable Gene Set Analysis</strong>"), FALSE),
+            conditionalPanel(
+              condition = "input.show_gene_set == true",
+              selectizeInput("gene_set_input", "Select Genes:", 
+                choices = NULL, multiple = TRUE,
+                options = list(maxItems = 10, placeholder = "Choose genes...")),
+              actionButton("calc_gene_score", "Calculate Signature", 
+                class = "btn-primary btn-sm")
+            )
+          )
+        ),
+        
+        # SEACell Toggle - Collapsible
+        div(class = "collapsible-section",
+          div(class = "collapsible-header", onclick = "toggleCollapse('seacell-section')",
+            span(class = "section-header", "🔬 SEACell Metacells"),
+            span(class = "collapse-icon collapsed", "▼")
+          ),
+          div(id = "seacell-section", class = "collapsible-content", style = "display: none;",
+            checkboxInput("show_seacell_toggle", 
+              HTML("<strong>Enable SEACell View</strong>"), FALSE),
+            conditionalPanel(
+              condition = "input.show_seacell_toggle == true",
+              radioButtons("cell_level", "Display Level:", 
+                choices = c("Single Cells" = "single", "SEACells" = "meta"),
+                selected = "single", inline = TRUE)
+            )
+          )
+        ),
+        
+        # Differential Expression - Collapsible
+        div(class = "collapsible-section",
+          div(class = "collapsible-header", onclick = "toggleCollapse('dge-section')",
+            span(class = "section-header", "📈 Differential Expression"),
+            span(class = "collapse-icon collapsed", "▼")
+          ),
+          div(id = "dge-section", class = "collapsible-content", style = "display: none;",
+            checkboxInput("show_dge", 
+              HTML("<strong>Enable DE Analysis</strong>"), FALSE),
+            conditionalPanel(
+              condition = "input.show_dge == true",
+              selectInput("dge_group_by", "Group by:", 
+                choices = c("Cluster" = "cluster", "Cell Type" = "cell_type")),
+              selectInput("dge_condition_1", "Condition A:", choices = NULL),
+              selectInput("dge_condition_2", "Condition B:", choices = NULL),
+              actionButton("run_dge", "Run DE Test", class = "btn-primary btn-sm"),
+              tags$small(class = "text-muted", 
+                "Click a gene in results to view violin plot.")
+            )
+          )
+        ),
+
+        # Milo Analysis - Collapsible
+        div(class = "collapsible-section",
+          div(class = "collapsible-header", onclick = "toggleCollapse('milo-section')",
+            span(class = "section-header", "📊 Differential Expression with Milo"),
+            span(class = "collapse-icon collapsed", "▼")
+          ),
+          div(id = "milo-section", class = "collapsible-content", style = "display: none;",
+            checkboxInput("show_milo", 
+              HTML("<strong>Enable Milo Analysis</strong>"), FALSE),
+            conditionalPanel(
+              condition = "input.show_milo == true",
+              selectInput("milo_group_by", "Group by:", 
+                choices = c("Cluster", "Cell Type")),
+              selectInput("milo_condition_1", "Condition A:", choices = NULL),
+              selectInput("milo_condition_2", "Condition B:", choices = NULL),
+              actionButton("run_milo", "Run Milo Analysis", class = "btn-primary btn-sm"),
+              tags$small(class = "text-muted", 
+                "Milo requires a pre-computed graph. Ensure you have run the necessary steps.")
+            )
+          )
+        )
+      )
+    ),
+    
+    # Main Panel with Tabs
+    column(9,
+      tabsetPanel(id = "main_tabs",
+        
+        # Visualization Tab (original content)
+        tabPanel("🎨 Visualization", value = "visualization",
+          div(style = "position: relative; width: 100%; height: 800px; margin-top: 15px;",
+            tags$div(id = "loadingOverlay", 
+                     tags$div(class = "spinner"), 
+                     tags$span("Processing data...")),
+            tags$canvas(id = "scatterplot_canvas", width = 800, height = 400, 
+                       style = "border:1px solid #ccc; border-radius: 4px;")
+          ),
+          # Legends container for dynamic legends
+          tags$div(id = "legendsContainer", style = "margin-top: 15px;"),
+          verbatimTextOutput("selected_points")
+        ),
+        
+        # Quality Control Tab
+        tabPanel("🔍 Quality Control", value = "qc",
+          div(style = "margin-top: 15px;",
+            
+            # Main QC Plots Row
+            fluidRow(
+              # QC Violin/Box Plots
+              column(8,
+                div(class = "qc-plot-container",
+                  h4("QC Metrics Distribution"),
+                  plotOutput("qc_main_plot", height = "400px")
+                )
+              ),
+              
+              # QC Statistics
+              column(4,
+                div(class = "qc-plot-container",
+                  h4("QC Statistics"),
+                  tableOutput("qc_stats_table")
+                ),
+                div(class = "qc-plot-container",
+                  h4("Filtering Preview"),
+                  textOutput("filter_preview"),
+                  br(),
+                  div(style = "font-size: 12px; color: #6c757d;",
+                    "Cells passing current filters"
+                  )
+                )
+              )
+            ),
+            
+            # Detailed Tables Row
+            fluidRow(
+              column(12,
+                div(class = "qc-plot-container",
+                  h4("Detailed QC Table"),
+                  p("Interactive table showing QC metrics for all cells. Use filters to explore data."),
+                  DT::dataTableOutput("qc_detailed_table")
+                )
+              )
+            )
+          )
+        ),
+        
+        # Results/Analysis Tab (for DE results, etc.)
+        tabPanel("📊 Analysis Results", value = "results",
+          div(style = "margin-top: 15px;",
+            h3("🧬 Analysis Results"),
+            
+            # DE Results
+            conditionalPanel(
+              condition = "input.show_dge == true",
+              div(class = "qc-plot-container",
+                h4("📈 Differential Expression Results"),
+                DT::dataTableOutput("de_results")
+              )
+            ),
+            
+            # Gene Set Results  
+            conditionalPanel(
+              condition = "input.show_gene_set == true",
+              div(class = "qc-plot-container",
+                h4("📊 Gene Set Signature Results"),
+                verbatimTextOutput("gene_set_summary")
+              )
+            ),
+            
+            # Milo Results
+            conditionalPanel(
+              condition = "input.show_milo == true",
+              div(class = "qc-plot-container",
+                h4("📊 Milo Analysis Results"), 
+                verbatimTextOutput("milo_results")
+              )
+            ),
+            
+            # Default message when no analysis is active
+            conditionalPanel(
+              condition = "input.show_dge == false && input.show_gene_set == false && input.show_milo == false",
+              div(class = "qc-plot-container text-center",
+                h4("🔬 No Analysis Active"),
+                p("Enable analysis tools in the Visualization tab to see results here."),
+                tags$ul(class = "text-left",
+                  tags$li("Gene Set Signature Analysis"),
+                  tags$li("Differential Expression Analysis"),
+                  tags$li("Milo Differential Abundance Testing")
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  ),
+
+  # JavaScript for collapsible functionality
+  tags$script(HTML("
+    function toggleCollapse(sectionId) {
+      const content = document.getElementById(sectionId);
+      const header = content.previousElementSibling;
+      const icon = header.querySelector('.collapse-icon');
+      
+      if (content.style.display === 'none') {
+        content.style.display = 'block';
+        icon.classList.remove('collapsed');
+      } else {
+        content.style.display = 'none';
+        icon.classList.add('collapsed');
+      }
+    }
+    
+    // Initialize collapsed state for some sections
+    document.addEventListener('DOMContentLoaded', function() {
+      // Keep dataset and status sections expanded by default
+      // All others start collapsed except the first section in each tab
+    });
+  ")),
+
+  # Inject viridis colors for gene expression palette to JS
+  tags$script(HTML(sprintf("
+    const viridisColors = %s;
+    let scatterplot;
+    let clusters = [];
+    let geneExprRange = [];
+    let clusterColors = [];
+    let points = [];
+    let filteredPoints = [];
+    let annotations = {};
+    let currentColorBy = '';
+    let numAnnotations = 0;
+    let useTransition = false;
+
+  ", toJSON(viridis_hex, auto_unbox = TRUE))))
+)

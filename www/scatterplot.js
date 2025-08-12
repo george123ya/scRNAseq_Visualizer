@@ -27,14 +27,15 @@ let geneDataInfo = null; // Store gene data dimensions and info
 // Updated global variables to handle MAGIC data
 let geneExpressionOriginal = new Map(); // Original gene expression data
 let geneExpressionMAGIC = new Map();    // MAGIC-imputed gene expression data
-let isMAGICActive = false; 
+let isMAGICActive = false;
+
+let initScatterplotPromise = null; // Promise to track scatterplot initialization
 
 // Viridis color palette for gene expression
 const viridisColors = [
   '#440154', '#482777', '#3f4a8a', '#31678e', '#26838f', '#1f9d8a', 
   '#6cce5a', '#b6de2b', '#fee825', '#fcce25'
 ];
-
 
 function createSyncButton() {
   // Check if button already exists
@@ -319,7 +320,10 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
 
 async function createGenePlot(geneId) {
   console.log(`Creating gene plot for ${geneId}`);
-  if (genePlots[geneId]) return; // Already exists
+  if (genePlots[geneId]) {
+    console.log(`Gene plot for ${geneId} already exists - skipping creation`);
+    return; // Already exists
+  }
 
   // Create canvas
   const canvas = document.createElement('canvas');
@@ -401,15 +405,34 @@ async function createGenePlot(geneId) {
   });
 
   genePlots[geneId] = plot;
+  console.log(`Gene plot ${geneId} successfully created and stored`);
   
-  // Set up sync if enabled - this ensures new plots get synced
-  if (isSyncMode) {
-    setupSynchronization();
+  // **Inherit the main plot's current view ONLY during creation**
+  // This is completely separate from sync system
+  if (scatterplot && !scatterplot._destroyed) {
+    try {
+
+      const mainCameraView = scatterplot.get('cameraView');
+      if (mainCameraView) {
+        console.log(`Inheriting main plot view for ${geneId} during creation (one-time only)`);
+        // Apply the view without triggering events
+        plot.set({ cameraView: mainCameraView }, { preventEvent: true });
+
+        console.log("awi");
+        removeSynchronization();
+      }
+
+
+    } catch (error) {
+      console.warn(`Failed to inherit main plot view for ${geneId}:`, error);
+    }
   }
 
   // Update layout after creating plot
   updatePlotLayout();
 }
+
+
 
 function removeGenePlot(geneId) {
   if (!genePlots[geneId]) return;
@@ -705,6 +728,8 @@ async function initScatterplot() {
 
   subscribeMainPlotEvents();
   updatePlotLayout();
+
+  initScatterplotPromise = Promise.resolve();
 }
 
 function subscribeMainPlotEvents() {
@@ -799,9 +824,9 @@ function verifyCoordinateConsistency() {
 }
 
 
-function redrawMainPlot() {
+async function redrawMainPlot() {
   if (!scatterplot || filteredPoints.length === 0) return;
-  
+
   if (currentColorBy === 'seacell') {
     const annotationKeys = Object.keys(annotations);
     const annotationIndex = annotationKeys.indexOf('seacell');
@@ -862,15 +887,42 @@ function redrawMainPlot() {
       pointSize = 30;
     }
 
+    
     const config = { 
       colorBy: 'category',
       pointColor: colors,
       sizeBy: 'category',
       pointSize: Array(pointsColored.length).fill(pointSize),
     };
-
+    
     scatterplot.set(config);
     scatterplot.draw(pointsColored, { transition: useTransition });
+    
+    // if initScatterplot has been initialized, set x and y boundaries
+    if (initScatterplotPromise) {
+
+      // Compute bounds for x and y
+      const xs = filteredPoints.map(p => p[0]);
+      const ys = filteredPoints.map(p => p[1]);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const padX = (maxX - minX) * 0.1 || 1;
+      const padY = (maxY - minY) * 0.1 || 1;
+      // let indices = Array.from({ length: pointsColored.length }, (_, i) => i);
+      // console.log(indices);
+      // scatterplot.zoomToPoints(indices);
+      scatterplot.zoomToArea(
+        { x: minX - padX, y: minY - padY,
+          width: maxX + padX - (minX - padX),
+          height: maxY + padY - (minY - padY)
+        }
+      )
+
+      // set initScatterplotPromise to null
+      initScatterplotPromise = null;
+    }
 
     // Create legend for current annotation
     createPlotLegend('main', {
@@ -1071,7 +1123,7 @@ function updateActiveGeneExpressionCache() {
 }
 
 // Add a global setting for vmax mode
-let vmaxMode = 'p90'; // Options: 'max', 'p90', 'p95', 'p99'
+let vmaxMode = 'max'; // Options: 'max', 'p90', 'p95', 'p99'
 
 // Function to set vmax mode
 function setVmaxMode(mode) {
@@ -1434,10 +1486,10 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
     }
   }
 
-  // --- Add new genes ---
+  // --- Add new genes (with duplicate protection) ---
   const genesToAdd = [];
   for (const gene of newGenes) {
-    if (!activeGeneExpressions.has(gene)) {
+    if (!activeGeneExpressions.has(gene) && !genePlots[gene]) { // Extra check to prevent duplicates
       // Check if we have data in either original or MAGIC cache
       const hasOriginal = geneExpressionOriginal.has(gene);
       const hasMAGIC = geneExpressionMAGIC.has(gene);
@@ -1449,22 +1501,33 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
       }
       activeGeneExpressions.add(gene);
       genesToAdd.push(gene);
+    } else if (genePlots[gene]) {
+      console.log(`Gene plot for ${gene} already exists - skipping`);
     }
   }
 
-  // --- Create plots for new genes ---
+  // --- Create plots for new genes (view inheritance happens inside createGenePlot) ---
+  console.log(`About to create ${genesToAdd.length} new gene plots:`, genesToAdd);
   const createPromises = genesToAdd.map(gene => createGenePlot(gene));
 
   Promise.all(createPromises).then(() => {
-    if (activeGeneExpressions.size === 1) {
+    console.log(`Successfully created ${genesToAdd.length} gene plots`);
+    
+    // Create sync button only when we have gene plots available
+    if (activeGeneExpressions.size >= 1 && !document.getElementById('syncButton')) {
       createSyncButton();
     }
 
-    genesToAdd.forEach(gene => redrawGenePlot(gene));
+    // Draw the gene plots with data
+    genesToAdd.forEach(gene => {
+      console.log(`Drawing data for gene plot: ${gene}`);
+      redrawGenePlot(gene);
+    });
 
-    if (isSyncMode && activeGeneExpressions.size > 1) {
-      setupSynchronization();
-    }
+    // COMPLETELY AVOID sync setup during creation
+    // Sync will only happen when user manually toggles the sync button
+    console.log(`Current sync mode state: ${isSyncMode}`);
+    console.log("View inheritance complete - plots are now independent unless sync is manually enabled");
 
     updatePlotLayout();
   });
@@ -1477,6 +1540,39 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
     clearAllSyncHandlers();
   }
 });
+
+// **NEW: Helper function to manually sync all gene plots to main plot view**
+function syncAllGenePlotViewsToMain() {
+  if (!scatterplot || scatterplot._destroyed) {
+    console.warn('Main plot not available for view sync');
+    return;
+  }
+
+  try {
+    const mainCameraView = scatterplot.get('cameraView');
+    if (!mainCameraView) {
+      console.warn('Main plot camera view not available');
+      return;
+    }
+
+    console.log('Syncing all gene plot views to main plot');
+    
+    Object.keys(genePlots).forEach(geneId => {
+      const plot = genePlots[geneId];
+      if (plot && !plot._destroyed) {
+        try {
+          plot.set({ cameraView: mainCameraView }, { preventEvent: true });
+          console.log(`Synced view for ${geneId}`);
+        } catch (error) {
+          console.warn(`Failed to sync view for ${geneId}:`, error);
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error syncing gene plot views to main:', error);
+  }
+}
+
 
 function createMAGICIndicator() {
   if (document.getElementById('magicIndicator')) return;
@@ -1592,6 +1688,17 @@ window.geneDebug = {
 window.geneDebug = {
   ...window.geneDebug,
   verifyCoordinateConsistency
+};
+
+window.geneDebug = {
+  ...window.geneDebug,
+  syncAllGenePlotViewsToMain,
+  getCurrentMainView: () => {
+    if (scatterplot && !scatterplot._destroyed) {
+      return scatterplot.get('cameraView');
+    }
+    return null;
+  }
 };
 
 // Initialize
