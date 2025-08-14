@@ -45,12 +45,14 @@ suppressPackageStartupMessages({
 
 # Source global configurations and helper functions
 source("global.R")
+source("modules/utils.R")
+
 
 # Configure Python environment for scanpy/anndata
 
-# use_condaenv("sc_rna_env_python2", required = TRUE)
+use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-use_condaenv("shiny_app_env", required = TRUE)
+# use_condaenv("shiny_app_env", required = TRUE)
 
 
 # ==============================================================================
@@ -70,21 +72,16 @@ use_condaenv("shiny_app_env", required = TRUE)
 #' @param file_path Path to the .h5ad file
 #' @return List containing metadata, coordinates, and AnnData object reference
 #' @description Efficiently loads metadata while keeping expression data accessible
-init_lazy_h5ad_improved <- function(file_path) {
-  
-  print(file_path)
-
-  cat("🚀 Initializing improved lazy-loaded .h5ad file:", file_path, "\n")
+init_lazy_h5ad_enhanced <- function(file_path) {
+  cat("🚀 Initializing enhanced lazy-loaded .h5ad file:", file_path, "\n")
   
   tryCatch({
-    print("hey")
     # Try experimental lazy loading first (for Zarr-backed files)
     tryCatch({
-      print("huy")
       anndata_exp <- import("anndata.experimental", delay_load = TRUE)
       ad_lazy <- anndata_exp$read_lazy(file_path)
       cat("✅ Using experimental lazy loading (Zarr-backed)\n")
-      return(process_lazy_anndata(ad_lazy, file_path, is_zarr = TRUE))
+      return(process_lazy_anndata_enhanced(ad_lazy, file_path, is_zarr = TRUE))
     }, error = function(e) {
       cat("⚠️  Experimental lazy loading failed:", e$message, "\n")
       cat("🔄 Trying standard approach with selective loading...\n")
@@ -92,45 +89,16 @@ init_lazy_h5ad_improved <- function(file_path) {
     
     # Standard AnnData approach with selective loading strategy
     anndata <- import("anndata", delay_load = TRUE)
-    h5py <- import("h5py", delay_load = TRUE)
     
-    # First, try to read only metadata using h5py directly
-    tryCatch({
-      # Open HDF5 file to inspect structure without loading matrices
-      h5_file <- h5py$File(file_path, "r")
-      
-      cat("📋 Inspecting HDF5 structure...\n")
-      
-      # Check available keys
-      main_keys <- py_to_r(list(h5_file$keys()))
-      cat("🔑 Main keys:", paste(main_keys, collapse = ", "), "\n")
-      
-      # Try to get basic info without loading full matrices
-      if ("obs" %in% main_keys) {
-        n_obs <- h5_file[["obs"]]$shape[0]
-        cat("📊 Found", n_obs, "observations\n")
-      }
-      
-      if ("var" %in% main_keys) {
-        n_vars <- h5_file[["var"]]$shape[0] 
-        cat("🧬 Found", n_vars, "variables\n")
-      }
-      
-      h5_file$close()
-      
-    }, error = function(e) {
-      cat("⚠️  Direct HDF5 inspection failed:", e$message, "\n")
-    })
-    
-    # Load with standard AnnData but implement our own lazy strategy
+    # Load with standard AnnData
     cat("📖 Loading AnnData object with selective strategy...\n")
     ad_obj <- anndata$read_h5ad(file_path)
     
-    return(process_lazy_anndata(ad_obj, file_path, is_zarr = FALSE))
+    return(process_lazy_anndata_enhanced(ad_obj, file_path, is_zarr = FALSE))
     
   }, error = function(e) {
     cat("❌ All loading methods failed:", e$message, "\n")
-    stop("Could not initialize lazy loading: ", e$message)
+    stop("Could not initialize enhanced loading: ", e$message)
   })
 }
 
@@ -140,7 +108,7 @@ init_lazy_h5ad_improved <- function(file_path) {
 #' @param file_path Original file path
 #' @param is_zarr Whether this is a Zarr-backed lazy object
 #' @return Processed lazy data structure
-process_lazy_anndata <- function(ad_obj, file_path, is_zarr = NULL) {
+process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
   pd <- import("pandas")
   
   # Auto-detect Zarr from filename if not provided
@@ -168,10 +136,11 @@ process_lazy_anndata <- function(ad_obj, file_path, is_zarr = NULL) {
     return(py_to_r(col_pd))
   }
   
-  # Load var info and genes fully
+  # Load var info and process gene names
   var_df <- py_to_r(ad_obj$var)
-  gene_names <- as.character(py_to_r(ad_obj$var_names$to_list()))
-  cat("🧬 Found", length(gene_names), "genes\n")
+  gene_info <- process_gene_names(ad_obj)
+  
+  cat("🧬 Found", length(gene_info$display_names), "genes\n")
   
   # Get obsm keys
   obsm_keys <- py_to_r(ad_obj$obsm_keys())
@@ -197,24 +166,6 @@ process_lazy_anndata <- function(ad_obj, file_path, is_zarr = NULL) {
   
   df <- as.data.frame(umap)
   colnames(df) <- c("x", "y")
-  
-  # Helper to get obs columns by possible names, returns factor vector or NULL
-  get_obs_col <- function(possible_names) {
-    for (nm in possible_names) {
-      val <- get_obs_column(nm)
-      if (!is.null(val)) {
-        cat("📊 Found annotation:", nm, "\n")
-        return(as.factor(val))
-      }
-    }
-    return(NULL)
-  }
-  
-  # Extract common annotations
-  df$cluster <- get_obs_col(c("pheno_100", "leiden", "cluster_feature", "Cluster_Fine"))
-  df$cell_type <- get_obs_col(c("celltype", "Annotation"))
-  df$condition <- get_obs_col(c("Condition", "Sample"))
-  df$time <- get_obs_col(c("Time"))
   
   # Extract MAGIC UMAP coordinates if available
   if ("X_umap_magic" %in% obsm_keys) {
@@ -267,7 +218,8 @@ process_lazy_anndata <- function(ad_obj, file_path, is_zarr = NULL) {
     df = df,
     obs = NULL,          # Don't keep full obs loaded (too large, use get_obs_column)
     var = var_df,
-    genes = gene_names,
+    genes = gene_info$display_names,         # What user sees in UI
+    gene_info = gene_info,                   # Complete gene mapping info
     ad_obj = ad_obj,
     seacell_df = seacell_df,
     obs_keys = obs_cols,
@@ -280,6 +232,93 @@ process_lazy_anndata <- function(ad_obj, file_path, is_zarr = NULL) {
   )
 }
 
+process_gene_names <- function(ad_obj) {
+  pd <- reticulate::import("pandas")
+  
+  # Get var column names
+  var_cols <- py_to_r(ad_obj$var$columns$to_list())
+
+  print(var_cols)
+  
+  # Helper to safely fetch a var column
+  get_var_column <- function(name) {
+    if (!(name %in% var_cols)) {
+      return(NULL)
+    }
+    col_py <- ad_obj$var[[name]]
+    col_pd <- pd$Series(col_py)  # materialize lazy-backed column
+    return(as.character(py_to_r(col_pd)))
+  }
+  
+  # Materialize var_names
+  var_names <- as.character(py_to_r(ad_obj$var_names$to_list()))
+  
+  # List of possible gene symbol columns
+  possible_gene_cols <- c("gene_symbols", "gene_name", "symbol", "Symbol", 
+                          "gene_symbol", "Gene_Symbol", "SYMBOL", "name", 
+                          "Name", "feature_name")
+  
+  # Find the first matching column
+  gene_symbols <- NULL
+  gene_symbols_col <- NULL
+  for (col in possible_gene_cols) {
+    col_data <- get_var_column(col)
+    if (!is.null(col_data)) {
+      gene_symbols <- col_data
+      gene_symbols_col <- col
+      cat("📋 Found gene symbols in column:", col, "\n")
+      break
+    }
+  }
+  
+  # Determine if var_names contains Ensembl IDs
+  has_ensembl_ids <- any(grepl("^ENS[A-Z]*[0-9]+", var_names, ignore.case = TRUE))
+  cat("🧬 var_names contains Ensembl IDs:", has_ensembl_ids, "\n")
+  
+  # Decide display names and mapping
+  if (has_ensembl_ids && !is.null(gene_symbols)) {
+    display_names <- gene_symbols
+    missing <- is.na(display_names) | display_names == "" | display_names == "NA"
+    display_names[missing] <- var_names[missing]
+    
+    name_to_index <- setNames(var_names, display_names)
+    
+    # Handle duplicated symbols
+    dup <- duplicated(display_names) | duplicated(display_names, fromLast = TRUE)
+    if (any(dup)) {
+      display_names[dup] <- paste0(gene_symbols[dup], " (", var_names[dup], ")")
+      name_to_index <- setNames(var_names, display_names)
+      cat("⚠️ Found", sum(dup), "duplicated gene symbols, added ENS IDs as suffix\n")
+    }
+    
+    cat("✅ Using gene symbols for display, ENS IDs for indexing\n")
+    
+  } else if (!has_ensembl_ids && !is.null(gene_symbols)) {
+    display_names <- gene_symbols
+    missing <- is.na(display_names) | display_names == "" | display_names == "NA"
+    display_names[missing] <- var_names[missing]
+    
+    name_to_index <- setNames(var_names, display_names)
+    cat("✅ Using cleaned gene symbols for display\n")
+    
+  } else {
+    display_names <- var_names
+    name_to_index <- setNames(var_names, display_names)
+    cat("✅ Using var_names directly for display and indexing\n")
+  }
+  
+  cat("📊 Total genes:", length(display_names), "\n")
+  cat("📊 Unique display names:", length(unique(display_names)), "\n")
+  
+  return(list(
+    display_names = display_names,
+    var_names = var_names,
+    name_to_index = name_to_index,
+    has_ensembl_ids = has_ensembl_ids,
+    gene_symbols_col = gene_symbols_col
+  ))
+}
+
 
 
 #' Extract gene expression data with smart caching
@@ -289,7 +328,7 @@ process_lazy_anndata <- function(ad_obj, file_path, is_zarr = NULL) {
 #' @param use_layer Character, which expression layer to use
 #' @param use_cache Whether to use expression cache
 #' @return List with encoded expression data and statistics
-extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", use_cache = TRUE) {
+extract_gene_data_enhanced <- function(gene_names, lazy_data, use_layer = "auto", use_cache = TRUE) {
   if (length(gene_names) == 0) {
     return(list(
       genes = character(0), 
@@ -301,25 +340,23 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
   }
 
   tryCatch({
-    # DEBUG: print classes before coercion
-    cat("DEBUG: class of gene_names before coercion:", class(gene_names), "\n")
-    cat("DEBUG: class of lazy_data$genes before coercion:", class(lazy_data$genes), "\n")
-
-    # Force full coercion to character vector
-    gene_names_char <- as.character(gene_names)
-    genes_vec <- lazy_data$genes
+    # Convert display names to var_names for matrix indexing
+    gene_info <- lazy_data$gene_info
     
-    # If genes_vec is python object, convert to R character vector forcibly
-    if (inherits(genes_vec, "python.builtin.object")) {
-      genes_vec <- reticulate::py_to_r(genes_vec)
+    # Map display names to var_names (matrix column names)
+    var_names_for_extraction <- character(0)
+    valid_display_names <- character(0)
+    
+    for (gene_name in gene_names) {
+      if (gene_name %in% names(gene_info$name_to_index)) {
+        var_names_for_extraction <- c(var_names_for_extraction, gene_info$name_to_index[[gene_name]])
+        valid_display_names <- c(valid_display_names, gene_name)
+      } else {
+        cat("⚠️  Gene not found:", gene_name, "\n")
+      }
     }
-    genes_vec_char <- as.character(genes_vec)
-
-    # Now match
-    gene_indices <- match(gene_names_char, genes_vec_char)
-    valid_mask <- !is.na(gene_indices)
-
-    if (!any(valid_mask)) {
+    
+    if (length(var_names_for_extraction) == 0) {
       cat("⚠️  No valid genes found\n")
       return(list(
         genes = character(0), 
@@ -329,13 +366,28 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
         magic_ranges = list()
       ))
     }
-
-    valid_genes <- gene_names_char[valid_mask]
+    
+    cat("🔍 Extracting", length(var_names_for_extraction), "genes:", paste(head(valid_display_names, 5), collapse = ", "), 
+        if(length(valid_display_names) > 5) "..." else "", "\n")
+    
+    # Find indices in var_names for extraction
+    gene_indices <- match(var_names_for_extraction, gene_info$var_names)
+    valid_mask <- !is.na(gene_indices)
+    
+    if (!any(valid_mask)) {
+      cat("⚠️  No valid gene indices found\n")
+      return(list(
+        genes = character(0), 
+        data = character(0),
+        magic_data = character(0), 
+        ranges = list(), 
+        magic_ranges = list()
+      ))
+    }
+    
     valid_indices <- gene_indices[valid_mask]
-
-    # Continue rest of function ...
-    cat("🔍 Smart extracting", length(valid_genes), "genes:", paste(head(valid_genes, 5), collapse = ", "), 
-        if(length(valid_genes) > 5) "..." else "", "\n")
+    final_display_names <- valid_display_names[valid_mask]
+    final_var_names <- var_names_for_extraction[valid_mask]
     
     # Determine which layer to use
     if (use_layer == "auto") {
@@ -356,7 +408,6 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
       }
     }
 
-    
     # Extract expression data efficiently
     if (lazy_data$is_zarr && lazy_data$memory_strategy == "true_lazy") {
       # True lazy loading for Zarr files
@@ -400,7 +451,6 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
       }
     }
 
-
     # Convert to dense matrix if sparse
     if (inherits(expr_subset, c("dgRMatrix", "dgCMatrix"))) {
       expr_matrix <- as.matrix(expr_subset)
@@ -418,8 +468,8 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
     
     cat("📊 Final expression matrix:", nrow(expr_matrix), "cells ×", ncol(expr_matrix), "genes\n")
     
-    # Calculate gene expression statistics
-    gene_ranges <- calculate_gene_ranges(expr_matrix, valid_genes)
+    # Calculate gene expression statistics using display names
+    gene_ranges <- calculate_gene_ranges(expr_matrix, final_display_names)
     
     # Extract MAGIC data if available
     magic_data <- ""
@@ -443,8 +493,8 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
         binary_magic_data <- writeBin(as.numeric(magic_data_vector), raw())
         magic_data <- base64enc::base64encode(binary_magic_data)
         
-        # Calculate MAGIC ranges
-        magic_ranges <- calculate_gene_ranges(magic_matrix, valid_genes)
+        # Calculate MAGIC ranges using display names
+        magic_ranges <- calculate_gene_ranges(magic_matrix, final_display_names)
         
         cat("✨ MAGIC data extracted successfully\n")
         
@@ -464,7 +514,7 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
     cat("💾 MAGIC data size:", nchar(magic_data), "characters\n")
     
     return(list(
-      genes = valid_genes,
+      genes = final_display_names,        # Return display names for UI
       data = encoded_data,
       magic_data = magic_data,
       ranges = gene_ranges,
@@ -472,11 +522,12 @@ extract_gene_data_smart <- function(gene_names, lazy_data, use_layer = "auto", u
       nrows = nrow(expr_matrix),
       ncols = ncol(expr_matrix),
       layer_used = use_layer,
-      memory_strategy = lazy_data$memory_strategy
+      memory_strategy = lazy_data$memory_strategy,
+      var_names_used = final_var_names     # Also return var_names for debugging
     ))
     
   }, error = function(e) {
-    cat("❌ Error in smart gene extraction:", e$message, "\n")
+    cat("❌ Error in enhanced gene extraction:", e$message, "\n")
     return(list(
       genes = character(0),
       data = character(0),
@@ -743,6 +794,7 @@ server <- function(input, output, session) {
       encoded_data <- encode_data(processed_result)
       n_cols <- ncol(processed_result$data) 
 
+
       # Send to JavaScript
       session$sendCustomMessage("updateData", list(
         base64 = encoded_data,
@@ -805,7 +857,7 @@ server <- function(input, output, session) {
       # Use improved initialization
       values$current_dataset <- input$dataset
       print(input$dataset)
-      values$lazy_data <- init_lazy_h5ad_improved(input$dataset)
+      values$lazy_data <- init_lazy_h5ad_enhanced(input$dataset)
       
       # Determine success message based on strategy
       strategy_msg <- if(values$lazy_data$is_zarr) {
@@ -967,7 +1019,7 @@ server <- function(input, output, session) {
       session$sendCustomMessage("showSpinner", TRUE)
       
       # Use improved smart extraction
-      gene_data <- extract_gene_data_smart(gene_list, values$lazy_data)
+      gene_data <- extract_gene_data_enhanced(gene_list, values$lazy_data)
       
       session$sendCustomMessage("showSpinner", FALSE)
       
@@ -1022,10 +1074,11 @@ server <- function(input, output, session) {
   
   # Color by UI
   output$colorByUI <- renderUI({
-    if (is.null(values$annotation_names)) {
+    if (is.null(categorical_vars())) {
       selectInput("colorBy", "Color cells by:", choices = list("Initialize dataset first..." = "loading"))
     } else {
-      choices <- setNames(values$annotation_names, tools::toTitleCase(gsub("_", " ", values$annotation_names)))
+      # choices <- setNames(values$annotation_names, tools::toTitleCase(gsub("_", " ", values$annotation_names)))
+      choices <- c(categorical_vars(), numeric_obs_keys())
       selectInput("colorBy", "Color cells by:", choices = choices, selected = choices[1])
     }
   })
@@ -1033,7 +1086,34 @@ server <- function(input, output, session) {
   # Handle color by changes
   observeEvent(input$colorBy, {
     if (!is.null(input$colorBy) && input$colorBy != "loading") {
-      session$sendCustomMessage("colorByChange", input$colorBy)
+      
+      # Get annotation column
+      annotation_data <- values$lazy_data$get_obs_column(input$colorBy)
+      
+      ann_colors <- generate_colors(length(unique(annotation_data)))
+      var_type <- ifelse(is.numeric(annotation_data), "gene", "categorical")
+      
+      if (var_type != 'gene') {
+        numeric_annotation_data <- as.numeric(factor(annotation_data, exclude = NULL))
+      } else {
+        numeric_annotation_data <- as.numeric(annotation_data)
+      }
+      
+      # Convert to binary and encode as base64
+      binary_data <- writeBin(as.numeric(numeric_annotation_data), 
+                            raw(), 
+                            size = 4, 
+                            endian = "little")
+      annotation_raw <- base64enc::base64encode(binary_data)
+      
+      session$sendCustomMessage("colorByChange", list(
+        colorBy = input$colorBy,
+        annotation_raw = annotation_raw,  # Send binary data
+        annotation_length = length(numeric_annotation_data),  # Include length for validation
+        names = unique(annotation_data),
+        colors = ann_colors,
+        var_type = var_type
+      ))
     }
   })
 
@@ -1114,7 +1194,7 @@ server <- function(input, output, session) {
     
     tryCatch({
       # Extract expression data using smart method
-      gene_data <- extract_gene_data_smart(input$gene_set_input, values$lazy_data)
+      gene_data <- extract_gene_data_enhanced(input$gene_set_input, values$lazy_data)
       
       session$sendCustomMessage("showSpinner", FALSE)
       
@@ -1206,9 +1286,9 @@ server <- function(input, output, session) {
       test_genes <- head(values$lazy_data$genes, max_genes)
       
       cat("🧬 Testing", length(test_genes), "genes with", values$lazy_data$memory_strategy, "strategy\n")
-      
-      # Extract expression data using smart method
-      gene_data <- extract_gene_data_smart(test_genes, values$lazy_data)
+
+      # Extract expression data using enhanced method
+      gene_data <- extract_gene_data_enhanced(test_genes, values$lazy_data)
       
       if (length(gene_data$genes) == 0) {
         showNotification("No gene expression data found", type = "error")
@@ -1329,38 +1409,49 @@ server <- function(input, output, session) {
     }
   })
 
-  # Helper to classify obs_keys
-  categorical_vars <- reactive({
+  # ---- Precompute column statistics once ----
+  obs_stats <- reactive({
     req(values$lazy_data)
     keys <- values$lazy_data$obs_keys
     
-    cats <- Filter(function(k) {
-      col <- values$lazy_data$get_obs_column(k)
-      uniq_vals <- unique(col)
-      
-      # Detect integer-like numeric
-      is_integer_like <- is.numeric(col) && all(!is.na(col)) && all(col == floor(col))
-      
-      (is.factor(col) || is.character(col) || is_integer_like) &&
-        length(uniq_vals) <= 20
-    }, keys)
+    # Load each obs column once
+    cols <- lapply(keys, function(k) {
+      values$lazy_data$get_obs_column(k)
+    })
+    names(cols) <- keys
     
-    sort(cats)
+    # Compute stats for each column
+    lapply(cols, function(col) {
+      nuniq <- length(unique(col))
+      
+      # Detect integer-like numeric (robust)
+      is_numeric <- is.numeric(col)
+      is_integer_like <- is_numeric && all(!is.na(col)) &&
+        all(abs(col - round(col)) < .Machine$double.eps^0.5)
+      is_real_numeric <- is_numeric && !is_integer_like
+      
+      is_categorical <- (is.factor(col) || is.character(col) || is_integer_like) &&
+                        nuniq <= 20
+      
+      list(
+        categorical = is_categorical,
+        numeric     = is_real_numeric && nuniq > 1
+      )
+    })
   })
 
-  # Helper to get numeric obs columns
-  numeric_obs_keys <- reactive({
-    req(values$lazy_data)
-    cols <- values$lazy_data$obs_keys
-    
-    nums <- Filter(function(k) {
-      col <- values$lazy_data$get_obs_column(k)
-      is_real_numeric <- is.numeric(col) && !all(col == floor(col))  # exclude integer-like
-      length(unique(col)) > 1 && is_real_numeric
-    }, cols)
-    
-    sort(nums)
+  # ---- Categorical obs keys ----
+  categorical_vars <- reactive({
+    stats <- obs_stats()
+    sort(names(Filter(function(s) s$categorical, stats)))
   })
+
+  # ---- Numeric obs keys ----
+  numeric_obs_keys <- reactive({
+    stats <- obs_stats()
+    sort(names(Filter(function(s) s$numeric, stats)))
+  })
+
 
   # Single metric (for violin/box/hist)
   output$qc_metric_ui <- renderUI({

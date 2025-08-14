@@ -10,7 +10,7 @@ detect_annotations <- function(df) {
     grep(pattern, all_cols, ignore.case = TRUE, value = TRUE)
   }))
   gene_cols <- unique(gene_cols)
-  
+
   # If none detected, pick a numeric column as fallback
   if (length(gene_cols) == 0) {
     numeric_cols <- names(Filter(is.numeric, df))[!names(Filter(is.numeric, df)) %in% required]
@@ -19,8 +19,11 @@ detect_annotations <- function(df) {
   
   # Annotation columns (categorical or low-unique numeric)
   annotation_cols <- setdiff(all_cols, c(required, gene_cols))
-  annotation_cols <- annotation_cols[sapply(df[annotation_cols], function(x)
-    is.factor(x) || is.character(x) || (is.numeric(x) && length(unique(x)) <= 20))]
+
+  # annotation_cols <- annotation_cols[sapply(df[annotation_cols], function(x)
+  #   is.factor(x) || is.character(x) || (is.numeric(x) && length(unique(x)) <= 20))]
+
+  # print("awo")
 
   list(
     gene_cols = gene_cols,
@@ -80,13 +83,12 @@ process_dataframe <- function(df) {
     unname(sapply(annotation_info$cluster$colors, darken_and_saturate_color))
   } else character(0)
 
-
-
   # print(metacell_colors)
 
   processed_df$dummy <- rep(1, nrow(df))
 
   # print(annotation_info)
+
 
   list(
     data = processed_df,

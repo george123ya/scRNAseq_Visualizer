@@ -31,6 +31,8 @@ let isMAGICActive = false;
 
 let initScatterplotPromise = null; // Promise to track scatterplot initialization
 
+let mainAnnotation = null;
+
 // Viridis color palette for gene expression
 const viridisColors = [
   '#440154', '#482777', '#3f4a8a', '#31678e', '#26838f', '#1f9d8a', 
@@ -304,7 +306,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
           visible.add(i);
           item.style.opacity = '1';
         }
-        redrawAllPlots();
+        redrawAllPlots(mainAnnotation);
       };
 
       itemsContainer.appendChild(item);
@@ -404,25 +406,38 @@ async function createGenePlot(geneId) {
     }
   });
 
+  // Store the plot BEFORE trying to inherit view
   genePlots[geneId] = plot;
   console.log(`Gene plot ${geneId} successfully created and stored`);
   
   // **Inherit the main plot's current view ONLY during creation**
-  // This is completely separate from sync system
+  // Wait a frame to ensure plot is fully initialized
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  
   if (scatterplot && !scatterplot._destroyed) {
     try {
-
       const mainCameraView = scatterplot.get('cameraView');
+      
       if (mainCameraView) {
-        console.log(`Inheriting main plot view for ${geneId} during creation (one-time only)`);
-        // Apply the view without triggering events
+        console.log(`Inheriting main plot view for ${geneId} during creation:`, mainCameraView);
+        
+        // Apply the view to the newly created plot without triggering events
         plot.set({ cameraView: mainCameraView }, { preventEvent: true });
+        
+        // Also sync ALL existing gene plots to maintain consistency
+        Object.keys(genePlots).forEach(existingGeneId => {
+          if (existingGeneId !== geneId && genePlots[existingGeneId] && !genePlots[existingGeneId]._destroyed) {
+            try {
+              console.log(`Also syncing existing plot ${existingGeneId} to main view`);
+              genePlots[existingGeneId].set({ cameraView: mainCameraView }, { preventEvent: true });
+            } catch (error) {
+              console.warn(`Failed to sync existing plot ${existingGeneId}:`, error);
+            }
+          }
+        });
 
-        console.log("awi");
         removeSynchronization();
       }
-
-
     } catch (error) {
       console.warn(`Failed to inherit main plot view for ${geneId}:`, error);
     }
@@ -550,7 +565,6 @@ function setupSynchronization() {
   const createSyncHandler = (sourceId) => {
     return () => {
       if (!isSyncMode || syncing) return;
-      
       syncing = true;
       
       try {
@@ -570,6 +584,7 @@ function setupSynchronization() {
         // Direct, synchronous updates for best performance
         validTargets.forEach(target => {
           try {
+            console.log(`Syncing camera view to target: ${target.id}`);
             target.set({ cameraView }, { preventEvent: true });
           } catch (error) {
             console.warn('Failed to sync camera to target:', error);
@@ -758,25 +773,55 @@ function subscribeMainPlotEvents() {
 }
 
 function filterPoints() {
-  if (Object.keys(annotations).length === 0) return points;
 
-  // console.log(gene_number, annotations);
-  // console.log(points.length, points[0]);
-  
-  return points.filter(p => {
-    return !Object.keys(annotations).some((key, idx) => {
-      const valueIndex = 2 + gene_number + idx;
-      const value = p[valueIndex] - 1;
-      // console.log(`Checking annotation ${key} with value ${value} (index ${valueIndex})`);
-      if (!annotations[key].visible.has(value)) {
-        return true;
-      }
-      return false;
+  if (mainAnnotation == null) return points;
+
+  if (mainAnnotation.var_type != 'categorical') {
+
+    let minVal = Infinity;
+    let maxVal = -Infinity;
+
+    const pointsColored = points.map((p, i) => {
+      const newP = [...p];
+      const rawVal = mainAnnotation.annotation[i] - 1;
+
+      // track min and max while building new array
+      if (rawVal < minVal) minVal = rawVal;
+      if (rawVal > maxVal) maxVal = rawVal;
+
+      newP[2] = rawVal; // temporarily store raw
+      return newP;
     });
-  });
+
+    const range = maxVal - minVal || 1;
+
+    // second pass to normalize
+    pointsColored.forEach(p => {
+      p[2] = (p[2] - minVal) / range;
+    });
+
+    return pointsColored;
+
+  } else {
+
+    const pointsColored = points.map((p, i) => {
+      const newP = [...p];
+      newP[2] = mainAnnotation.annotation[i] - 1; // match index
+      return newP;
+    });
+  
+  
+    return pointsColored.filter(p => {
+      const valueIndex = 2 + gene_number;
+      const value = p[valueIndex];
+      return mainAnnotation.visible.has(value);
+    });
+
+  }
+  
 }
 
-function redrawAllPlots() {
+async function redrawAllPlots(mainAnnotation=null) {
   if (points.length === 0) return;
   
   // Always update filteredPoints before redrawing
@@ -784,12 +829,12 @@ function redrawAllPlots() {
   filteredPoints = filterPoints();
   
   // Redraw main plot
-  redrawMainPlot();
+  await redrawMainPlot(mainAnnotation);
   
   // Redraw gene plots
-  Object.keys(genePlots).forEach(geneId => {
+  await Promise.all(Object.keys(genePlots).map(async geneId => {
     redrawGenePlot(geneId);
-  });
+  }));
 }
 
 // Additional debugging function to verify coordinate consistency
@@ -824,82 +869,45 @@ function verifyCoordinateConsistency() {
 }
 
 
-async function redrawMainPlot() {
+async function redrawMainPlot(annotation=null) {
   if (!scatterplot || filteredPoints.length === 0) return;
 
-  if (currentColorBy === 'seacell') {
-    const annotationKeys = Object.keys(annotations);
-    const annotationIndex = annotationKeys.indexOf('seacell');
-    const clusterIndex = annotationKeys.indexOf('cluster');
+  if (annotation !== null) {
 
-    if (annotationIndex === -1) return;
-
-    const colorIdx = 2 + gene_number + annotationIndex;
-    const clusterIdx = 2 + gene_number + clusterIndex;
-
-    const regularCells = filteredPoints.filter(p => p[colorIdx] === 1);
-    const metacells = filteredPoints.filter(p => p[colorIdx] === 2);
-
-    let allPoints = [];
-    regularCells.forEach(p => {
-      allPoints.push([p[0], p[1], p[clusterIdx] - 1, 0]);
-    });
-    metacells.forEach(p => {
-      allPoints.push([p[0], p[1], (p[clusterIdx] - 1) + clusters.length, 1]);
-    });
-
-    const config = { 
-      colorBy: 'category', 
-      sizeBy: 'value',
-      pointSize: [5, 10],
-      pointColor: clusterColors,
-      opacity: 0.8
-    };
-
-    scatterplot.set(config);
-    scatterplot.draw(allPoints);
-
-    // Create legend for seacell mode (showing clusters)
-    if (annotations['cluster']) {
-      createPlotLegend('main', {
-        names: annotations['cluster'].names,
-        colors: annotations['cluster'].colors,
-        visible: annotations['cluster'].visible,
-        annotationName: 'Clusters'
-      }, 'categorical');
-    }
+    console.log(annotation);
     
-  } else if (currentColorBy && annotations[currentColorBy]) {
-    const annotationKeys = Object.keys(annotations);
-    const annotationIndex = annotationKeys.indexOf(currentColorBy);
-    const colorIdx = 2 + gene_number + annotationIndex;
-    let colors = annotations[currentColorBy].colors;
-
-    const pointsColored = filteredPoints.map(p => {
-      const newP = [...p];
-      newP[2] = p[colorIdx] - 1;
-      return newP;
-    });
-
-    if (pointsColored.length < 300) {
-      pointSize = 100;
+    // if var_type not categorical, get viridis colors
+    if (annotation.var_type != 'categorical') {
+      colors = viridisColors
     } else {
-      pointSize = 30;
+      colors = annotation.colors;
     }
 
+
+    if (filteredPoints.length < 300) {
+      pointSize = 100;
+    } else if (filteredPoints.length < 50000) {
+      pointSize = 30;
+    } else {
+      pointSize = 3;
+    }
+
+    console.log(filteredPoints);
     
     const config = { 
       colorBy: 'category',
       pointColor: colors,
       sizeBy: 'category',
-      pointSize: Array(pointsColored.length).fill(pointSize),
+      pointSize: Array(filteredPoints.length).fill(pointSize),
     };
     
     scatterplot.set(config);
-    scatterplot.draw(pointsColored, { transition: useTransition });
+    await scatterplot.draw(filteredPoints, { transition: useTransition });
     
     // if initScatterplot has been initialized, set x and y boundaries
     if (initScatterplotPromise) {
+
+      console.log("Resizing plot");
 
       // Compute bounds for x and y
       const xs = filteredPoints.map(p => p[0]);
@@ -924,13 +932,74 @@ async function redrawMainPlot() {
       initScatterplotPromise = null;
     }
 
-    // Create legend for current annotation
-    createPlotLegend('main', {
-      names: annotations[currentColorBy].names,
-      colors: annotations[currentColorBy].colors,
-      visible: annotations[currentColorBy].visible,
-      annotationName: currentColorBy
-    }, 'categorical');
+    if (annotation.var_type == 'categorical') {
+
+      // Create legend for current annotation
+      createPlotLegend('main', {
+        names: annotation.names,
+        colors: annotation.colors,
+        visible: annotation.visible,
+        annotationName: annotation.colorBy
+      }, 'categorical');
+
+    } else {
+
+      const values = Array.from(annotation.annotation); // ensure it's a real array
+      const minVal = Math.min(...values);
+      const maxVal = Math.max(...values);
+      const meanVal = values.reduce((a, b) => a + b, 0) / values.length;
+
+      console.log(minVal);
+      createPlotLegend('main', {
+        minVal: minVal.toFixed(2),
+        maxVal: maxVal.toFixed(2),
+        midVal: meanVal.toFixed(2),
+        geneName: annotation.colorBy
+      }, 'gene');
+    }
+
+
+
+  } else {
+
+    if (points.length < 300) {
+      pointSize = 100;
+    } else {
+      pointSize = 30;
+    }
+    
+    const config = { 
+      pointColor: '#000000',
+    };
+    
+    scatterplot.set(config);
+    scatterplot.draw(points, { transition: useTransition });
+    
+    // if initScatterplot has been initialized, set x and y boundaries
+    if (initScatterplotPromise) {
+
+      // Compute bounds for x and y
+      const xs = points.map(p => p[0]);
+      const ys = points.map(p => p[1]);
+      const minX = xs.reduce((a, b) => Math.min(a, b), Infinity);
+      const maxX = xs.reduce((a, b) => Math.max(a, b), -Infinity);
+      const minY = ys.reduce((a, b) => Math.min(a, b), Infinity);
+      const maxY = ys.reduce((a, b) => Math.max(a, b), -Infinity);
+      const padX = (maxX - minX) * 0.1 || 1;
+      const padY = (maxY - minY) * 0.1 || 1;
+      // let indices = Array.from({ length: pointsColored.length }, (_, i) => i);
+      // console.log(indices);
+      // scatterplot.zoomToPoints(indices);
+      scatterplot.zoomToArea(
+        { x: minX - padX, y: minY - padY,
+          width: maxX + padX - (minX - padX),
+          height: maxY + padY - (minY - padY)
+        }
+      )
+
+      // set initScatterplotPromise to null
+      initScatterplotPromise = null;
+    }
   }
 }
 
@@ -1047,50 +1116,56 @@ function processGeneExpressionData(expressionData) {
     geneExpressionCache.clear();
     
     expressionData.genes.forEach((geneName, geneIndex) => {
-      // Original data
-      const geneValues = [];
+      const geneValues = new Array(geneDataInfo.nrows);
+      let min = Infinity, max = -Infinity, sum = 0;
+
       for (let row = 0; row < geneDataInfo.nrows; row++) {
-        geneValues[row] = geneDataMatrix[row][geneIndex];
+        const val = geneDataMatrix[row][geneIndex];
+        geneValues[row] = val;
+        if (val < min) min = val;
+        if (val > max) max = val;
+        sum += val;
       }
-      
-      const min = Math.min(...geneValues);
-      const max = Math.max(...geneValues);
-      const mean = geneValues.reduce((a, b) => a + b, 0) / geneValues.length;
+
+      const mean = sum / geneValues.length;
       const p90 = calculatePercentile(geneValues, 90);
       const p95 = calculatePercentile(geneValues, 95);
       const p99 = calculatePercentile(geneValues, 99);
-      
+
       const originalGeneData = {
         values: geneValues,
         range: expressionData.ranges[geneName] || { min, max, mean },
         percentiles: { p90, p95, p99, min, max, mean }
       };
-      
       geneExpressionOriginal.set(geneName, originalGeneData);
-      
+
       // MAGIC data if available
       if (magicDataMatrix) {
-        const magicGeneValues = [];
+        const magicGeneValues = new Array(geneDataInfo.nrows);
+        let mMin = Infinity, mMax = -Infinity, mSum = 0;
+
         for (let row = 0; row < geneDataInfo.nrows; row++) {
-          magicGeneValues[row] = magicDataMatrix[row][geneIndex];
+          const val = magicDataMatrix[row][geneIndex];
+          magicGeneValues[row] = val;
+          if (val < mMin) mMin = val;
+          if (val > mMax) mMax = val;
+          mSum += val;
         }
-        
-        const magicMin = Math.min(...magicGeneValues);
-        const magicMax = Math.max(...magicGeneValues);
-        const magicMean = magicGeneValues.reduce((a, b) => a + b, 0) / magicGeneValues.length;
+
+        const mMean = mSum / magicGeneValues.length;
         const magicP90 = calculatePercentile(magicGeneValues, 90);
         const magicP95 = calculatePercentile(magicGeneValues, 95);
         const magicP99 = calculatePercentile(magicGeneValues, 99);
-        
+
         const magicGeneData = {
           values: magicGeneValues,
-          range: expressionData.magic_ranges[geneName] || { min: magicMin, max: magicMax, mean: magicMean },
-          percentiles: { p90: magicP90, p95: magicP95, p99: magicP99, min: magicMin, max: magicMax, mean: magicMean }
+          range: expressionData.magic_ranges[geneName] || { min: mMin, max: mMax, mean: mMean },
+          percentiles: { p90: magicP90, p95: magicP95, p99: magicP99, min: mMin, max: mMax, mean: mMean }
         };
-        
         geneExpressionMAGIC.set(geneName, magicGeneData);
       }
     });
+
     
     // Set the active cache based on current MAGIC state
     updateActiveGeneExpressionCache();
@@ -1123,7 +1198,7 @@ function updateActiveGeneExpressionCache() {
 }
 
 // Add a global setting for vmax mode
-let vmaxMode = 'max'; // Options: 'max', 'p90', 'p95', 'p99'
+let vmaxMode = 'p90'; // Options: 'max', 'p90', 'p95', 'p99'
 
 // Function to set vmax mode
 function setVmaxMode(mode) {
@@ -1173,7 +1248,7 @@ function redrawGenePlot(geneId) {
   }
   
   console.log(`Redrawing plot for ${geneId} with ${geneData.values.length} expression values`);
-  
+  console.log(geneData);
   // Determine vmax based on mode first
   let vmax;
   let vmaxLabel;
@@ -1200,25 +1275,31 @@ function redrawGenePlot(geneId) {
   
   // Create points with gene expression values - normalize to [0,1] range
   const genePoints = [];
-  
-  for (let i = 0; i < filteredPoints.length; i++) {
-    const point = filteredPoints[i];
-    const originalIndex = points.indexOf(point);
-    
-    if (originalIndex !== -1 && originalIndex < geneData.values.length) {
-      let expressionValue = geneData.values[originalIndex];
-      
-      // Normalize expression value to [0,1] based on vmax
-      const normalizedValue = Math.min(expressionValue / vmax, 1.0);
-      
-      // Use coordinates from the points array (which gets updated by toggleMAGIC)
-      // This ensures gene plots use the same coordinates as the main plot
-      const x = point[0];  // This now contains the updated coordinates
-      const y = point[1];  // This now contains the updated coordinates
-      
-      genePoints.push([x, y, normalizedValue]);
-    }
-  }
+
+  let minVal = Infinity;
+  let maxVal = -Infinity;
+
+  // First pass: copy points and track min/max
+  const pointsColored = points.map((p, i) => {
+    const newP = [...p];
+    const rawVal = geneData.values[i] - 1;
+
+    if (rawVal < minVal) minVal = rawVal;
+    if (rawVal > maxVal) maxVal = rawVal;
+
+    newP[2] = rawVal; // temporarily store raw
+    return newP;
+  });
+
+  const range = vmax - minVal || 1;
+
+  pointsColored.forEach(p => {
+    const rawVal = p[2];
+    // subtract min and divide by fixed range, clamp to 1
+    const normalized = Math.min((rawVal - minVal) / range, 1.0);
+    p[2] = normalized;
+    genePoints.push([p[0], p[1], normalized]);
+  });
   
   if (genePoints.length === 0) {
     console.warn(`No valid points to plot for gene: ${geneId}`);
@@ -1229,7 +1310,7 @@ function redrawGenePlot(geneId) {
   const config = {
     colorBy: 'valueA',
     pointColor: viridisColors,
-    pointSize: 50,
+    pointSize: 10,
     colorRange: [0, 1]
   };
 
@@ -1305,7 +1386,7 @@ Shiny.addCustomMessageHandler('showSpinner', function(show) {
   setSpinner(show);
 });
 
-Shiny.addCustomMessageHandler('updateData', function(message) {
+Shiny.addCustomMessageHandler('updateData', async function(message) {
   try {
     const { base64, annotationData, numCols, clusters: cl, colors, metacellColors, geneExprRanges: ge } = message;
 
@@ -1368,9 +1449,12 @@ Shiny.addCustomMessageHandler('updateData', function(message) {
       clusterColors = [...colors, ...metacellColors];
     }
 
+    mainAnnotation = null;
+
     // Set up annotations
     annotations = {};
     if (annotationData) {
+      // console.log(annotationData);
       Object.keys(annotationData).forEach(key => {
         const names = annotationData[key].names;
         const colors = annotationData[key].colors;
@@ -1413,7 +1497,9 @@ Shiny.addCustomMessageHandler('updateData', function(message) {
       plot.set({ pointSize, opacity, performanceMode });
     });
 
-    redrawAllPlots();
+    initScatterplotPromise = Promise.resolve();
+
+    await redrawAllPlots(mainAnnotation);
     setSpinner(false);
     
   } catch (error) {
@@ -1422,30 +1508,62 @@ Shiny.addCustomMessageHandler('updateData', function(message) {
   }
 });
 
-Shiny.addCustomMessageHandler('colorByChange', function(colorBy) {
-  //  check if seacell is in annotations
-  if (colorBy && !annotations[colorBy] && 'seacell' in annotations) {
-    if (colorBy === 'seacell') {
-      annotations['seacell'].visible.add(1);
-    } else {
-      annotations['seacell'].visible.delete(1);
+Shiny.addCustomMessageHandler('colorByChange', async function(message) {
+  // Decode binary annotation data from base64
+  if (message.annotation_raw) {
+    try {
+      // Decode base64 to binary string
+      const binaryString = atob(message.annotation_raw);
+      
+      // Create ArrayBuffer from binary string
+      const buffer = new ArrayBuffer(binaryString.length);
+      const bytes = new Uint8Array(buffer);
+      
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      // Interpret as Float32 array (matches R's writeBin with size=4)
+      message.annotation = new Float32Array(buffer);
+      
+      // Validate length if provided
+      if (message.annotation_length && message.annotation.length !== message.annotation_length) {
+        console.warn('Binary data length mismatch:', message.annotation.length, 'vs expected:', message.annotation_length);
+      }
+      
+      console.log('Binary transfer successful:', message.annotation.length, 'values');
+      
+    } catch (error) {
+      console.error('Failed to decode binary annotation data:', error);
+      // Fallback: could request non-binary version or show error
+      return;
     }
+  } else {
+    console.warn('No binary annotation data received');
+    return;
   }
 
-  currentColorBy = colorBy;
-  
+  // Visible set = all indices by default
+  message.visible = new Set(message.names.map((_, i) => i));
+
   // Remove sync button for non-gene expression modes
   if (!activeGeneExpressions.size) {
     removeSyncButton();
-    
-    // If currently in sync mode, disable it
     if (isSyncMode) {
       toggleSyncMode();
     }
   }
 
-  redrawAllPlots();
+  mainAnnotation = message;
+  await redrawAllPlots(mainAnnotation);
 });
+
+// Shiny.addCustomMessageHandler('mainPlotAnnotationChange', function(message) {
+//   // from base64 to array
+//   const annotation = JSON.parse(atob(message.annotation));
+//   currentAnnotation = annotation;
+//   redrawMainPlot(currentAnnotation);
+// });
 
 // Modify the existing geneSearchChange handler
 Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
@@ -1640,7 +1758,7 @@ function toggleMAGIC(isActivated) {
   useTransition = true;
   
   // Redraw all plots with new coordinates and expression data
-  redrawAllPlots();
+  redrawAllPlots(mainAnnotation);
 
   // Extend timeout to ensure transitions complete
   setTimeout(() => {
