@@ -115,6 +115,9 @@ ui <- fluidPage(
     fluidRow(
     # Sidebar Panel (always visible)
     column(3,
+      # titlePanel("RAM usage over time"),
+      # plotlyOutput("ram_plot", height = "300px"),
+
       # Dataset Selection - Always Expanded
       div(class = "collapsible-section",
         div(class = "collapsible-header", onclick = "toggleCollapse('dataset-section')",

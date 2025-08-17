@@ -12,7 +12,7 @@ encode_data <- function(processed_result) {
   # Combine required, gene, annotation, and dummy columns
   all_cols <- c("x", "y", "magic_x", "magic_y", gene_cols_scaled, ann_cols, "dummy")
 
-  print(paste("Encoding columns:", paste(all_cols, collapse = ", ")))
+  # print(paste("Encoding columns:", paste(all_cols, collapse = ", ")))
 
   # Encode to base64
   mat <- as.matrix(df[all_cols])

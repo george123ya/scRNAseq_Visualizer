@@ -40,7 +40,6 @@ const viridisColors = [
 ];
 
 function createSyncButton() {
-  // Check if button already exists
   if (document.getElementById('syncButton')) return;
 
   const buttonContainer = document.createElement('div');
@@ -54,10 +53,10 @@ function createSyncButton() {
 
   const syncButton = document.createElement('button');
   syncButton.id = 'syncButton';
-  syncButton.textContent = 'Enable Sync Mode';
+  syncButton.textContent = 'Disable Sync Mode';
   syncButton.style.cssText = `
     padding: 8px 16px;
-    background: #007bff;
+    background: #dc3545;
     color: white;
     border: none;
     border-radius: 4px;
@@ -65,15 +64,19 @@ function createSyncButton() {
     font-size: 14px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.2);
   `;
-
   syncButton.onclick = toggleSyncMode;
   buttonContainer.appendChild(syncButton);
-  
-  // Add to the plot grid container
+
   const plotGrid = document.getElementById('plotGrid');
   plotGrid.style.position = 'relative';
   plotGrid.appendChild(buttonContainer);
+
+  // Explicitly start sync mode now
+  setTimeout(() => {
+    toggleSyncMode();  // will set text to Disable + red, and call setupSynchronization()
+  }, 0);
 }
+
 
 function removeSyncButton() {
   const buttonContainer = document.getElementById('syncButtonContainer');
@@ -357,17 +360,25 @@ async function createGenePlot(geneId) {
 
   // Get optimal settings based on point count
   const pointCount = points.length;
-  let pointSize = 2.5;
+  let pointSize = 3;
   let opacity = 0.8;
   let performanceMode = false;
 
-  if (pointCount >= 1000000) {
-    pointSize = 2;
-    opacity = 0.6;
-    performanceMode = true;
-  } else if (pointCount >= 500000) {
-    pointSize = 1;
-    opacity = 0.4;
+  // if (pointCount >= 1000000) {
+  //   pointSize = 2;
+  //   opacity = 0.6;
+  //   performanceMode = true;
+  // } else if (pointCount >= 500000) {
+  //   pointSize = 1;
+  //   opacity = 0.4;
+  // }
+
+  if (pointCount < 300) {
+    pointSize = 100;
+  } else if (pointCount < 50000) {
+    pointSize = 30;
+  } else {
+    pointSize = 3;
   }
 
   const plot = createScatterplot({
@@ -436,7 +447,19 @@ async function createGenePlot(geneId) {
           }
         });
 
+        let keepSync = false;
+
+        if (isSyncMode) {
+          keepSync = true;
+        }
+
         removeSynchronization();
+
+        if (keepSync) {
+          setTimeout(() => {
+            toggleSyncMode();  // will set text to Disable + red, and call setupSynchronization()
+          }, 0);
+        }
       }
     } catch (error) {
       console.warn(`Failed to inherit main plot view for ${geneId}:`, error);
@@ -584,7 +607,7 @@ function setupSynchronization() {
         // Direct, synchronous updates for best performance
         validTargets.forEach(target => {
           try {
-            console.log(`Syncing camera view to target: ${target.id}`);
+            // console.log(`Syncing camera view to target: ${target.id}`);
             target.set({ cameraView }, { preventEvent: true });
           } catch (error) {
             console.warn('Failed to sync camera to target:', error);
@@ -735,7 +758,7 @@ async function initScatterplot() {
     canvas,
     width: canvas.clientWidth || 800,
     height: canvas.clientHeight || 400,
-    pointSize: 2.5,
+    // pointSize: 2.5,
     opacity: 0.8,
     lassoOnLongPress: true,
     lassoType: 'freeform',
@@ -973,7 +996,7 @@ async function redrawMainPlot(annotation=null) {
     };
     
     scatterplot.set(config);
-    scatterplot.draw(points, { transition: useTransition });
+    await scatterplot.draw(points, { transition: useTransition });
     
     // if initScatterplot has been initialized, set x and y boundaries
     if (initScatterplotPromise) {
@@ -1235,98 +1258,76 @@ function logPerformanceStats() {
   }
 }
 
+
+function getColorLimits(geneData, vmaxMode) {
+  // pick vmax from percentiles
+  let vmax;
+  switch (vmaxMode) {
+    case 'p90': vmax = geneData.percentiles.p90; break;
+    case 'p95': vmax = geneData.percentiles.p95; break;
+    case 'p99': vmax = geneData.percentiles.p99; break;
+    case 'max': 
+    default:    vmax = geneData.percentiles.max; break;
+  }
+
+  // vmin = min(0, actual min)
+  let vmin = Math.min(0, geneData.percentiles.min);
+
+  // If vmax and vmin are almost identical (like all zeros)
+  if (Math.abs(vmax - vmin) < 1e-9) {
+    vmin = -0.1;
+    vmax =  0.1;
+  }
+
+  return { vmin, vmax };
+}
+
+
 // Updated redrawGenePlot function with percentile scaling
 function redrawGenePlot(geneId) {
   const plot = genePlots[geneId];
   if (!plot || filteredPoints.length === 0) return;
-  
-  // Check if we have cached gene expression data for this gene
+
   const geneData = geneExpressionCache.get(geneId);
   if (!geneData) {
     console.warn(`No expression data found for gene: ${geneId}`);
     return;
   }
-  
-  console.log(`Redrawing plot for ${geneId} with ${geneData.values.length} expression values`);
-  console.log(geneData);
-  // Determine vmax based on mode first
-  let vmax;
-  let vmaxLabel;
-  
-  switch(vmaxMode) {
-    case 'p90':
-      vmax = geneData.percentiles.p90;
-      vmaxLabel = `P90: ${vmax.toFixed(2)}`;
-      break;
-    case 'p95':
-      vmax = geneData.percentiles.p95;
-      vmaxLabel = `P95: ${vmax.toFixed(2)}`;
-      break;
-    case 'p99':
-      vmax = geneData.percentiles.p99;
-      vmaxLabel = `P99: ${vmax.toFixed(2)}`;
-      break;
-    case 'max':
-    default:
-      vmax = geneData.percentiles.max;
-      vmaxLabel = `Max: ${vmax.toFixed(2)}`;
-      break;
-  }
-  
-  // Create points with gene expression values - normalize to [0,1] range
-  const genePoints = [];
 
-  let minVal = Infinity;
-  let maxVal = -Infinity;
+  // 1. Determine vmin/vmax using helper
+  const { vmin, vmax } = getColorLimits(geneData, vmaxMode);
+  const range = vmax - vmin;
 
-  // First pass: copy points and track min/max
-  const pointsColored = points.map((p, i) => {
-    const newP = [...p];
-    const rawVal = geneData.values[i] - 1;
-
-    if (rawVal < minVal) minVal = rawVal;
-    if (rawVal > maxVal) maxVal = rawVal;
-
-    newP[2] = rawVal; // temporarily store raw
-    return newP;
+  // 2. Normalize points to [0,1]
+  const genePoints = points.map((p, i) => {
+    const rawVal = geneData.values[i];
+    const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.01);
+    return [p[0], p[1], normalized];
   });
 
-  const range = vmax - minVal || 1;
-
-  pointsColored.forEach(p => {
-    const rawVal = p[2];
-    // subtract min and divide by fixed range, clamp to 1
-    const normalized = Math.min((rawVal - minVal) / range, 1.0);
-    p[2] = normalized;
-    genePoints.push([p[0], p[1], normalized]);
-  });
-  
   if (genePoints.length === 0) {
     console.warn(`No valid points to plot for gene: ${geneId}`);
     return;
   }
 
-  // Set up the plot configuration
+  // 3. Set plot config
   const config = {
     colorBy: 'valueA',
     pointColor: viridisColors,
-    pointSize: 10,
-    colorRange: [0, 1]
+    // colorRange: [0, 1]
   };
 
-  // Always use transition when useTransition is true
-  // Don't clear the plot when transitioning to allow smooth animation
-  if (!useTransition) {
-    plot.clear();
-  }
-  
+  if (!useTransition) plot.clear();
   plot.set(config);
   plot.draw(genePoints, { transition: useTransition });
 
-  // Create gene expression legend with percentile info
+  console.log('minVal:', vmin.toFixed(2));
+  console.log('maxVal:', vmax.toFixed(2));
+
+  // 4. Update legend
   createPlotLegend(geneId, {
-    minVal: geneData.percentiles.min.toFixed(2),
-    maxVal: vmaxLabel,
+    minVal: vmin.toFixed(2),
+    maxVal: vmax.toFixed(2),
     midVal: geneData.percentiles.mean.toFixed(2),
     geneName: geneId
   }, 'gene');
@@ -1386,10 +1387,33 @@ Shiny.addCustomMessageHandler('showSpinner', function(show) {
   setSpinner(show);
 });
 
+// Replace your current updateData handler with this version
 Shiny.addCustomMessageHandler('updateData', async function(message) {
+  // Capture timing immediately
+  const jsReceiveTime = Date.now();
+  const jsProcessStart = performance.now();
+  
   try {
-    const { base64, annotationData, numCols, clusters: cl, colors, metacellColors, geneExprRanges: ge } = message;
+    const { 
+      base64, 
+      annotationData, 
+      numCols, 
+      clusters: cl, 
+      colors, 
+      metacellColors, 
+      geneExprRanges: ge,
+      sendTime,  // R timestamp when message was sent
+      timingId   // Unique ID for this timing measurement
+    } = message;
 
+    // Calculate transfer time if sendTime is provided
+    let transferTime = null;
+    if (sendTime) {
+      transferTime = jsReceiveTime - sendTime;
+      console.log('⏱ R→JS transfer time:', transferTime.toFixed(2), 'ms');
+    }
+
+    // === YOUR EXISTING CODE STARTS HERE ===
     geneExprRange = ge;
     if (geneExprRange && Object.keys(geneExprRange).length > 0) {
       console.log("Gene expression range:", geneExprRange);
@@ -1454,7 +1478,6 @@ Shiny.addCustomMessageHandler('updateData', async function(message) {
     // Set up annotations
     annotations = {};
     if (annotationData) {
-      // console.log(annotationData);
       Object.keys(annotationData).forEach(key => {
         const names = annotationData[key].names;
         const colors = annotationData[key].colors;
@@ -1499,12 +1522,53 @@ Shiny.addCustomMessageHandler('updateData', async function(message) {
 
     initScatterplotPromise = Promise.resolve();
 
+    // Time the redraw operation specifically
+    const redrawStart = performance.now();
     await redrawAllPlots(mainAnnotation);
+    const redrawEnd = performance.now();
+    
     setSpinner(false);
+    // === YOUR EXISTING CODE ENDS HERE ===
+    
+    // Calculate total processing time
+    const jsProcessEnd = performance.now();
+    const jsProcessingTime = jsProcessEnd - jsProcessStart;
+    const redrawTime = redrawEnd - redrawStart;
+    
+    console.log('⏱ Total JS processing:', jsProcessingTime.toFixed(2), 'ms');
+    console.log('⏱ redrawAllPlots took:', redrawTime.toFixed(2), 'ms');
+    
+    // Send timing back to R in the format it expects
+    const completionTime = Date.now();
+    
+    Shiny.setInputValue("updateData_done", {
+      timingId: timingId,
+      jsReceiveTime: jsReceiveTime,
+      jsCompletionTime: completionTime,
+      transferTime: transferTime,
+      jsProcessingTime: jsProcessingTime,
+      redrawTime: redrawTime,
+      totalEndToEndTime: sendTime ? (completionTime - sendTime) : null,
+      dataStats: {
+        pointCount: pointCount,
+        numCols: numCols,
+        base64Length: base64?.length || 0
+      },
+      timestamp: completionTime
+    }, {priority: 'event'});
+    
+    console.log('📤 Sent timing data back to R');
     
   } catch (error) {
-    console.error('Error in updateData:', error);
+    console.error('❌ Error in updateData:', error);
     setSpinner(false);
+    
+    // Send error info back to R
+    Shiny.setInputValue("updateData_done", {
+      timingId: message.timingId || "unknown",
+      error: error.message,
+      timestamp: Date.now()
+    }, {priority: 'event'});
   }
 });
 
