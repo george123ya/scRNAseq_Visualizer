@@ -18,6 +18,8 @@ dependencies:
   - r-patchwork
   - r-cowplot
   - r-xml2
+  - r-ps
+  - r-future
   - pip
   - zlib 
   - requests

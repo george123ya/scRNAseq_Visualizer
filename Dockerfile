@@ -25,6 +25,8 @@ COPY yml/shiny_app_env.yml /tmp/env.yml
 RUN micromamba create -y -n shiny_app_env -f /tmp/env.yml && \
     micromamba clean --all --yes
 
+RUN micromamba run -n shiny_app_env R -e "install.packages('peakRAM', repos='https://cloud.r-project.org')"
+
 # Copy your Shiny app code
 COPY . /home/shiny-app
 WORKDIR /home/shiny-app
@@ -33,4 +35,5 @@ WORKDIR /home/shiny-app
 EXPOSE 3838
 
 # Run the Shiny app with micromamba environment activated
-CMD ["micromamba", "run", "-n", "shiny_app_env", "R", "-e", "shiny::runApp('.', host='0.0.0.0', port=3838)"]
+# CMD ["micromamba", "run", "-n", "shiny_app_env", "R", "-e", "shiny::runApp('.', host='0.0.0.0', port=3838)"]
+CMD ["sh", "-c", "micromamba run -n shiny_app_env R -e \"shiny::runApp('.', host='0.0.0.0', port=as.numeric(Sys.getenv('PORT', 3838)))\""]
