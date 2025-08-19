@@ -237,7 +237,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
     position: absolute;
     top: 8px;
     right: 8px; /* Change to 'left: 8px;' for top-left placement */
-    width: 120px;
+    width: 150px;
     background: rgba(255, 255, 255, 0.9);
     border: 1px solid #ddd;
     font-size: 11px;
@@ -248,22 +248,47 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
   `;
 
   if (type === 'gene') {
-    const { minVal, maxVal, midVal, geneName } = legendData;
+    const { minVal, maxVal, midVal, realMin, realMax, geneName } = legendData;
     legendContainer.innerHTML = `
-      <div style="font-weight: bold; margin-bottom: 6px; text-align: center;">${geneName}</div>
-      <div style="display: flex; flex-direction: column; align-items: center;">
-        <div style="font-size: 10px;">High</div>
-        <div style="width: 20px; height: 80px;
-          background: linear-gradient(to top, ${viridisColors[0]}, ${viridisColors[Math.floor(viridisColors.length/2)]}, ${viridisColors[viridisColors.length-1]});
-          border: 1px solid #ccc; margin: 4px 0;">
-        </div>
-        <div style="font-size: 10px;">Low</div>
+      <div style="font-weight: bold; margin-bottom: 6px; text-align: center;">
+        ${geneName}
       </div>
-      <div style="font-size: 9px; text-align: center; margin-top: 4px; color: #666;">
-        Max: ${maxVal}<br>Mid: ${midVal}<br>Min: ${minVal}
+      <div style="display: flex; justify-content: center; align-items: center;">
+        <!-- Colorbar -->
+        <div style="
+          width: 20px; height: 80px;
+          background: linear-gradient(to top, 
+            ${viridisColors[0]}, 
+            ${viridisColors[Math.floor(viridisColors.length/2)]}, 
+            ${viridisColors[viridisColors.length-1]}
+          );
+          border: 1px solid #ccc;
+          margin-right: 6px;">
+        </div>
+        <!-- Tick labels -->
+        <div style="
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          height: 80px;
+          font-size: 9px;
+          color: #333;
+          text-align: left;">
+          <div>${maxVal}</div>
+          <div>${midVal}</div>
+          <div>${minVal}</div>
+        </div>
+      </div>
+      <div style="
+        font-size: 9px; 
+        text-align: center; 
+        margin-top: 4px; 
+        color: #666;">
+        Data range: ${realMin} – ${realMax}
       </div>
     `;
-  } else {
+  }
+ else {
     const { names, colors, visible, annotationName } = legendData;
 
     const titleDiv = document.createElement('div');
@@ -295,10 +320,23 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         opacity: ${visible.has(i) ? '1' : '0.4'};
         transition: opacity 0.2s;
       `;
+
       item.innerHTML = `
-        <div style="width: 12px; height: 12px; background: ${colors[i]};
-          margin-right: 6px; border-radius: 2px;"></div>
-        <span style="font-size: 10px; color: #333;">${name}</span>
+        <div style="
+          flex: 0 0 12px;
+          height: 12px;
+          background: ${colors[i]};
+          margin-right: 6px;
+          border-radius: 2px;">
+        </div>
+        <span style="
+          font-size: 10px;
+          color: #333;
+          flex: 1;
+          word-break: break-word;
+          overflow-wrap: anywhere;
+          white-space: normal;
+        ">${name}</span>
       `;
 
       item.onclick = () => {
@@ -977,6 +1015,8 @@ async function redrawMainPlot(annotation=null) {
         minVal: minVal.toFixed(2),
         maxVal: maxVal.toFixed(2),
         midVal: meanVal.toFixed(2),
+        realMin: minVal.toFixed(2),
+        realMax: maxVal.toFixed(2),
         geneName: annotation.colorBy
       }, 'gene');
     }
@@ -1300,7 +1340,7 @@ function redrawGenePlot(geneId) {
   // 2. Normalize points to [0,1]
   const genePoints = points.map((p, i) => {
     const rawVal = geneData.values[i];
-    const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.01);
+    const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.001);
     return [p[0], p[1], normalized];
   });
 
@@ -1327,7 +1367,9 @@ function redrawGenePlot(geneId) {
   createPlotLegend(geneId, {
     minVal: vmin.toFixed(2),
     maxVal: vmax.toFixed(2),
-    midVal: geneData.percentiles.mean.toFixed(2),
+    midVal: ((vmin + vmax) / 2).toFixed(2),
+    realMin: geneData.percentiles.min.toFixed(2),
+    realMax: geneData.percentiles.max.toFixed(2),
     geneName: geneId
   }, 'gene');
 }
