@@ -53,9 +53,9 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-use_condaenv("sc_rna_env_python2", required = TRUE)
+# use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-# use_condaenv("shiny_app_env", required = TRUE)
+use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
