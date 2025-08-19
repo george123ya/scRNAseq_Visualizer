@@ -61,29 +61,33 @@ reticulate::py_run_string("
 import zarr
 import numpy as np
 
-def get_gene_fast(z_csc, gene_index, layer):
-
-  n_genes = z_csc['X']['indptr'].shape[0] - 1
-  n_cells = z_csc['obs'][list(z_csc['obs'].array_keys())[0]].shape[0]
-  # Get start and end positions for this gene's data in CSC format
-  start_idx = z_csc['X']['indptr'][gene_index]
-  end_idx = z_csc['X']['indptr'][gene_index + 1]
-
-  # If gene has no expression values
-  if start_idx == end_idx:
-      return np.zeros(n_cells, dtype=np.float32)
-  # Get the cell indices and expression values for this gene
-  cell_indices = z_csc['X']['indices'][start_idx:end_idx]
-  if layer == 'X':
-    values = z_csc['X']['data'][start_idx:end_idx]
-  else:
-    values = z_csc['layers'][layer]['data'][start_idx:end_idx]
-
-  # Create full expression vector
-  expression = np.zeros(n_cells, dtype=np.float32)
-  expression[cell_indices] = values
+def get_gene_fast(z_csc, gene_index, layer='X'):
+    # Get number of cells
+    n_cells = z_csc['obs'][list(z_csc['obs'].array_keys())[0]].shape[0]
     
-  return expression
+    # Select correct CSC structure
+    if layer == 'X':
+        csc = z_csc['X']
+    else:
+        csc = z_csc['layers'][layer]
+
+    # Get start and end positions for this gene in the selected layer
+    start_idx = csc['indptr'][gene_index]
+    end_idx = csc['indptr'][gene_index + 1]
+
+    # If gene has no expression values
+    if start_idx == end_idx:
+        return np.zeros(n_cells, dtype=np.float32)
+
+    # Get the cell indices and expression values for this gene
+    cell_indices = csc['indices'][start_idx:end_idx]
+    values = csc['data'][start_idx:end_idx]
+
+    # Create full expression vector
+    expression = np.zeros(n_cells, dtype=np.float32)
+    expression[cell_indices] = values
+    
+    return expression
 ")
 
 # ==============================================================================
