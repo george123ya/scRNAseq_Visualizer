@@ -53,19 +53,18 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-# use_condaenv("sc_rna_env_python2", required = TRUE)
+use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-use_condaenv("shiny_app_env", required = TRUE)
+# use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
 import numpy as np
 
-def get_gene_fast(z_csc, gene_index):
+def get_gene_fast(z_csc, gene_index, layer):
 
   n_genes = z_csc['X']['indptr'].shape[0] - 1
-  n_cells = z_csc['obs'][list(z_csc['obs'].keys())[0]].shape[0]
-    
+  n_cells = z_csc['obs'][list(z_csc['obs'].array_keys())[0]].shape[0]
   # Get start and end positions for this gene's data in CSC format
   start_idx = z_csc['X']['indptr'][gene_index]
   end_idx = z_csc['X']['indptr'][gene_index + 1]
@@ -73,10 +72,12 @@ def get_gene_fast(z_csc, gene_index):
   # If gene has no expression values
   if start_idx == end_idx:
       return np.zeros(n_cells, dtype=np.float32)
-
   # Get the cell indices and expression values for this gene
   cell_indices = z_csc['X']['indices'][start_idx:end_idx]
-  values = z_csc['X']['data'][start_idx:end_idx]
+  if layer == 'X':
+    values = z_csc['X']['data'][start_idx:end_idx]
+  else:
+    values = z_csc['layers'][layer]['data'][start_idx:end_idx]
 
   # Create full expression vector
   expression = np.zeros(n_cells, dtype=np.float32)
@@ -269,7 +270,7 @@ process_zarr_data_fast <- function(z, file_path) {
         # Ultra-fast lazy extraction via Dask-style block processing
         # expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1))
         peak <- peakRAM({
-          expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1))
+          expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1), 'X')
         })
         print(peak)
         return(py_to_r(expr_vec))
@@ -278,7 +279,8 @@ process_zarr_data_fast <- function(z, file_path) {
           cat("❌ Layer", layer, "not available\n")
           return(NULL)
         }
-        expr_vec <- py_to_r(z$layers[[layer]][, as.integer(gene_idx - 1)])
+        # expr_vec <- py_to_r(z['layers'][[layer]][, as.integer(gene_idx - 1)])
+        expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1), layer)
         return(expr_vec)
       }
       
@@ -513,7 +515,7 @@ get_layer_keys_fast <- function(z, zarr_keys) {
   tryCatch({
     if ("layers" %in% zarr_keys) {
       layers_group <- z[["layers"]]
-      return(py_to_r(reticulate::import_builtins()$list(layers_group$group_keys())))
+      return(py_to_r(reticulate::import_builtins()$list(layers_group$keys())))
     } else {
       return(character(0))
     }
@@ -919,7 +921,10 @@ extract_gene_data_enhanced <- function(gene_names, lazy_data, use_layer = "X", u
     if ("MAGIC_imputed_data" %in% lazy_data$available_layers) {
       tryCatch({
         cat("✨ Extracting MAGIC imputed data...\n")
-        magic_matrix <- lazy_data$get_gene_expression(var_names = var_names_for_extraction, layer = "MAGIC_imputed_data")
+        expr_list <- lapply(var_names_for_extraction, function(g) {
+          lazy_data$get_gene_expression(gene_name = g, layer = "MAGIC_imputed_data")
+        })
+        magic_matrix <- do.call(cbind, expr_list)
         if (nrow(magic_matrix) != nrow(lazy_data$df) && ncol(magic_matrix) == nrow(lazy_data$df)) {
           magic_matrix <- t(magic_matrix)
         }

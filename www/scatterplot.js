@@ -1209,15 +1209,14 @@ function processGeneExpressionData(expressionData) {
 function updateActiveGeneExpressionCache() {
   geneExpressionCache.clear();
   
-  // Always use original expression data, regardless of MAGIC state
-  // MAGIC only affects coordinates, not gene expression values
-  const sourceCache = geneExpressionOriginal;
-  
+  // Original or MAGIC depending on isMAGICActive
+  const sourceCache = isMAGICActive ? geneExpressionMAGIC : geneExpressionOriginal;
+
   sourceCache.forEach((geneData, geneName) => {
     geneExpressionCache.set(geneName, geneData);
   });
-  
-  console.log(`Active cache updated with original expression data (MAGIC affects coordinates only)`);
+
+  console.log(`Active cache updated with ${isMAGICActive ? "MAGIC" : "original"} expression data`);
 }
 
 // Add a global setting for vmax mode
@@ -1466,7 +1465,7 @@ Shiny.addCustomMessageHandler('updateData', async function(message) {
 
       points.push([x, y, ...rest]);
       pointsXY.push([x, y]);
-      pointsMAGIC.push([magicX, magicY]);
+      pointsMAGIC.push([x, y]);
     }
 
     if ('seacell' in annotationData) {
