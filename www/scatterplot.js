@@ -216,6 +216,8 @@ function createPlotTitle(canvas, title) {
   container.appendChild(titleOverlay);
 }
 
+let lastClicked = null;
+
 function createPlotLegend(plotId, legendData, type = 'categorical') {
   const container = document.getElementById(plotId === 'main' ? 'scatterplot_canvas' : `gene_canvas_${plotId}`);
   if (!container) return;
@@ -317,6 +319,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         padding: 3px;
         cursor: pointer;
         border-radius: 3px;
+        user-select: none; /* prevent browser text selection on shift-click */
         opacity: ${visible.has(i) ? '1' : '0.4'};
         transition: opacity 0.2s;
       `;
@@ -339,19 +342,74 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         ">${name}</span>
       `;
 
-      item.onclick = () => {
-        if (visible.has(i)) {
-          visible.delete(i);
-          item.style.opacity = '0.4';
+      item.addEventListener('click', (e) => {
+        // Store scroll position before making changes
+        const scrollContainer = itemsContainer;
+        const scrollTop = scrollContainer.scrollTop;
+        
+        const currentlyVisible = Array.from(visible);
+
+        if (e.shiftKey && lastClicked !== null) {
+          // --- Shift click: select contiguous range ---
+          const start = Math.min(lastClicked, i);
+          const end = Math.max(lastClicked, i);
+
+          if (e.ctrlKey || e.metaKey) {
+            // Shift + Ctrl → ADD contiguous range to existing selection
+            for (let idx = start; idx <= end; idx++) {
+              visible.add(idx);
+            }
+          } else {
+            // Shift only → REPLACE with contiguous range
+            visible.clear();
+            for (let idx = start; idx <= end; idx++) {
+              visible.add(idx);
+            }
+          }
+
+        } else if (e.ctrlKey || e.metaKey) {
+          // --- Ctrl click: toggle one ---
+          if (visible.has(i)) {
+            visible.delete(i);
+          } else {
+            visible.add(i);
+          }
+          if (visible.size === 0) {
+            names.forEach((_, idx) => visible.add(idx));
+          }
+
         } else {
-          visible.add(i);
-          item.style.opacity = '1';
+          // --- Normal click: single vs all ---
+          if (currentlyVisible.length === names.length) {
+            visible.clear();
+            visible.add(i);
+          } else if (currentlyVisible.length === 1 && currentlyVisible[0] === i) {
+            visible.clear();
+            names.forEach((_, idx) => visible.add(idx));
+          } else {
+            visible.clear();
+            visible.add(i);
+          }
         }
+
+        lastClicked = i; // always update index
+
+        // Update opacities
+        itemsContainer.querySelectorAll('.legend-item').forEach((el, idx) => {
+          el.style.opacity = visible.has(idx) ? '1' : '0.4';
+        });
+
+        // Restore scroll position after DOM updates
+        requestAnimationFrame(() => {
+          scrollContainer.scrollTop = scrollTop;
+        });
+
         redrawAllPlots(mainAnnotation);
-      };
+      });
 
       itemsContainer.appendChild(item);
     });
+
 
     legendContainer.appendChild(itemsContainer);
   }
@@ -886,16 +944,21 @@ async function redrawAllPlots(mainAnnotation=null) {
   if (points.length === 0) return;
   
   // Always update filteredPoints before redrawing
-  // This ensures all plots use the most current coordinates
   filteredPoints = filterPoints();
   
-  // Redraw main plot
-  await redrawMainPlot(mainAnnotation);
+  // Start all plot redraws simultaneously
+  const allDrawPromises = [];
   
-  // Redraw gene plots
-  await Promise.all(Object.keys(genePlots).map(async geneId => {
-    redrawGenePlot(geneId);
-  }));
+  // Add main plot redraw
+  allDrawPromises.push(redrawMainPlot(mainAnnotation));
+  
+  // Add gene plot redraws
+  Object.keys(genePlots).forEach(geneId => {
+    allDrawPromises.push(Promise.resolve(redrawGenePlot(geneId)));
+  });
+  
+  // Wait for all plots to finish drawing simultaneously
+  await Promise.all(allDrawPromises);
 }
 
 // Additional debugging function to verify coordinate consistency
@@ -1325,7 +1388,7 @@ function getColorLimits(geneData, vmaxMode) {
 // Updated redrawGenePlot function with percentile scaling
 function redrawGenePlot(geneId) {
   const plot = genePlots[geneId];
-  if (!plot || filteredPoints.length === 0) return;
+  if (!plot) return;
 
   const geneData = geneExpressionCache.get(geneId);
   if (!geneData) {
@@ -1337,12 +1400,31 @@ function redrawGenePlot(geneId) {
   const { vmin, vmax } = getColorLimits(geneData, vmaxMode);
   const range = vmax - vmin;
 
-  // 2. Normalize points to [0,1]
-  const genePoints = points.map((p, i) => {
-    const rawVal = geneData.values[i];
-    const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.001);
-    return [p[0], p[1], normalized];
-  });
+  // 2. Create gene points - handle categorical filtering properly
+  const genePoints = [];
+
+  if (mainAnnotation && mainAnnotation.var_type === 'categorical') {
+    // For categorical filtering, build points from visible categories only
+    for (let originalIndex = 0; originalIndex < points.length; originalIndex++) {
+      const categoryIndex = mainAnnotation.annotation[originalIndex] - 1;
+      if (mainAnnotation.visible.has(categoryIndex)) {
+        const rawVal = geneData.values[originalIndex];
+        const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.001);
+        genePoints.push([
+          points[originalIndex][0], 
+          points[originalIndex][1], 
+          normalized
+        ]);
+      }
+    }
+  } else {
+    // For non-categorical or no filtering, use all points
+    for (let i = 0; i < points.length; i++) {
+      const rawVal = geneData.values[i];
+      const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.001);
+      genePoints.push([points[i][0], points[i][1], normalized]);
+    }
+  }
 
   if (genePoints.length === 0) {
     console.warn(`No valid points to plot for gene: ${geneId}`);
@@ -1353,15 +1435,11 @@ function redrawGenePlot(geneId) {
   const config = {
     colorBy: 'valueA',
     pointColor: viridisColors,
-    // colorRange: [0, 1]
   };
 
   if (!useTransition) plot.clear();
   plot.set(config);
   plot.draw(genePoints, { transition: useTransition });
-
-  console.log('minVal:', vmin.toFixed(2));
-  console.log('maxVal:', vmax.toFixed(2));
 
   // 4. Update legend
   createPlotLegend(geneId, {

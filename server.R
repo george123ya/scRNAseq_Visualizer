@@ -45,6 +45,7 @@ suppressPackageStartupMessages({
   library(later)
   library(xml2)
   library(peakRAM)
+  library(reshape2)
 })
 
 # Source global configurations and helper functions
@@ -53,9 +54,9 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-# use_condaenv("sc_rna_env_python2", required = TRUE)
+use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-use_condaenv("shiny_app_env", required = TRUE)
+# use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
@@ -1515,19 +1516,6 @@ server <- function(input, output, session) {
   })
 
   
-  # Update gene choices when data is loaded
-  observeEvent(values$lazy_data, {
-    req(values$lazy_data)
-    
-    updateSelectizeInput(
-      session,
-      "geneSearch",
-      choices = values$lazy_data$genes,
-      server = TRUE
-    )
-  })
-
-  
   # Update gene set choices when data is loaded
   observeEvent(values$lazy_data, {
     req(values$lazy_data)
@@ -1543,26 +1531,43 @@ server <- function(input, output, session) {
   # --- Gene Search ---
   
   # UI: Gene search
-  output$geneSearchUI <- renderUI({
-    if (is.null(values$lazy_data)) {
-      selectizeInput("geneSearch", "🔍 Search Gene:",
-                    choices = list("Initialize dataset first..." = "loading"),
-                    multiple = TRUE)
-    } else {
-      selectizeInput(
-        "geneSearch",
-        "🔍 Search Gene:",
-        choices = NULL,
-        multiple = TRUE,
-        options = list(
-          placeholder = paste0("Type gene names ..."),
-          openOnFocus = FALSE,
-          closeAfterSelect = TRUE,
-          plugins = list("remove_button"),
-          maxItems = 15
-        )
-      )
-    }
+  # output$geneSearchUI <- renderUI({
+  #   if (is.null(values$lazy_data)) {
+  #     selectizeInput("geneSearch", "🔍 Search Gene:",
+  #                   choices = list("Initialize dataset first..." = "loading"),
+  #                   multiple = TRUE)
+  #   } else {
+  #     # UI (static)
+  #     selectizeInput(
+  #       "geneSearch",
+  #       "🔍 Search Gene:",
+  #       choices = NULL,
+  #       multiple = TRUE,
+  #       options = list(
+  #         placeholder = "Type gene names...",
+  #         openOnFocus = FALSE,
+  #         closeAfterSelect = TRUE,
+  #         plugins = list("remove_button"),
+  #         maxItems = 15
+  #       )
+  #     )
+  #   }
+  # })
+
+  # Update gene choices when data is loaded
+  observeEvent(values$lazy_data, {
+    req(values$lazy_data)
+    updateSelectizeInput(
+      session,
+      "geneSearch",
+      choices = genes_server(),  # do not push everything
+      server = TRUE
+    )
+  })
+
+  genes_server <- reactive({
+    req(values$lazy_data)
+    values$lazy_data$genes   # full list stored in R, not browser
   })
 
   # UPDATED: Gene search observer with smart extraction
@@ -1641,8 +1646,18 @@ server <- function(input, output, session) {
       # Get annotation column
       annotation_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$colorBy)
       
+      # Use the refined classification from obs_stats
+      stats <- obs_stats()
+      
+      # Determine var_type using your refined logic
+      if (input$colorBy %in% names(stats)) {
+        var_type <- ifelse(stats[[input$colorBy]]$numeric, "gene", "categorical")
+      } else {
+        # Fallback for columns not in obs_stats (shouldn't happen normally)
+        var_type <- "categorical"
+      }
+      
       ann_colors <- generate_colors(length(unique(annotation_data)))
-      var_type <- ifelse(is.numeric(annotation_data), "gene", "categorical")
       
       if (var_type != 'gene') {
         numeric_annotation_data <- as.numeric(factor(annotation_data, exclude = NULL))
@@ -1758,18 +1773,33 @@ server <- function(input, output, session) {
     lapply(cols, function(col) {
       nuniq <- length(unique(col))
       
-      # Detect integer-like numeric (robust)
-      is_numeric <- is.numeric(col)
-      is_integer_like <- is_numeric && all(!is.na(col)) &&
-        all(abs(col - round(col)) < .Machine$double.eps^0.5)
-      is_real_numeric <- is_numeric && !is_integer_like
+      # Skip columns with only one unique value
+      if (nuniq <= 1) {
+        return(list(
+          categorical = FALSE,
+          numeric = FALSE
+        ))
+      }
       
-      is_categorical <- (is.factor(col) || is.character(col) || is_integer_like) &&
-                        nuniq <= 20
+      # Detect different data types
+      is_factor_or_char <- is.factor(col) || is.character(col)
+      is_numeric <- is.numeric(col)
+      
+      # Check if numeric values are integer-like (natural numbers)
+      is_integer_like <- FALSE
+      if (is_numeric && all(!is.na(col))) {
+        is_integer_like <- all(abs(col - round(col)) < .Machine$double.eps^0.5)
+      }
+      
+      # Categorical: factors, characters, OR integer-like numbers with ≤20 categories
+      is_categorical <- (is_factor_or_char || is_integer_like) && nuniq <= 20
+      
+      # Numeric: only continuous (non-integer-like) numeric data
+      is_truly_numeric <- is_numeric && !is_integer_like && nuniq > 1
       
       list(
         categorical = is_categorical,
-        numeric     = is_real_numeric && nuniq > 1
+        numeric = is_truly_numeric
       )
     })
   })
@@ -1828,7 +1858,179 @@ server <- function(input, output, session) {
       selected = "None"
     )
   })
-  
+
+
+  # UI select for clustering
+  output$heatmap_cluster_by_ui <- renderUI({
+    selectizeInput(
+      "heatmap_cluster_by", "Cluster by:",
+      choices = c('None', categorical_vars()),
+      options = list(
+        placeholder = 'Select a grouping variable...',
+        onInitialize = I('function() { this.setValue(""); }')
+      )
+    )
+  })
+
+  # Data for heatmap
+  heatmap_data <- eventReactive(input$update_heatmap, {
+    req(input$heatmap_genes)
+    
+    # Parse gene list
+    genes <- strsplit(input$heatmap_genes, ",\\s*")[[1]]
+    genes <- genes[genes %in% values$lazy_data$genes]
+    req(length(genes) > 0, "No valid genes found in dataset")
+
+    # Expression matrix (cells × genes)
+    expr_list <- lapply(genes, function(g) {
+      values$lazy_data$get_gene_expression(gene_name = g)
+    })
+    mat <- do.call(cbind, expr_list)
+    colnames(mat) <- genes
+    
+    # Aggregate if cluster_by is chosen
+    if (!is.null(input$heatmap_cluster_by) && input$heatmap_cluster_by != "None") {
+      group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$heatmap_cluster_by)
+      stopifnot(length(group_var) == nrow(mat))
+      # Compute group means
+      mat <- sapply(genes, function(g) tapply(mat[, g], group_var, mean, na.rm = TRUE))
+      mat <- t(mat)  # genes × groups
+    } else {
+      mat <- t(mat)  # genes × cells
+    }
+    
+    # Scale matrix by selected method
+    if (input$heatmap_score == "z_score") {
+      # Scale rows (genes) to z-scores
+      mat <- t(scale(t(mat)))  # row-wise scale
+    } else if (input$heatmap_score == "log") {
+      mat <- log1p(mat)
+    }
+    
+    mat
+  })
+
+  # Render heatmap
+  output$heatmapPlot <- renderPlot({
+    req(heatmap_data())
+    library(ComplexHeatmap)
+    Heatmap(heatmap_data(), name = "expression")
+  })
+
+
+  # Gene Tab
+
+  # Single metric (for violin/box/hist)
+  # output$gene_selected_ui <- renderUI({
+  #   if (is.null(input$geneSearch) || length(input$geneSearch) == 0) {
+  #     helpText("Select a gene from the search box to visualize expression.")
+  #   } else {
+  #     h4(paste("Selected gene(s):", paste(input$geneSearch, collapse = ", ")))
+  #   }
+  # })
+
+  # UI: Gene search
+  output$gene_selected_ui <- renderUI({
+    if (is.null(values$lazy_data)) {
+      selectizeInput("geneSearch_tab", "🔍 Search Gene:",
+                    choices = list("Initialize dataset first..." = "loading"),
+                    multiple = TRUE)
+    } else {
+      selectizeInput(
+        "geneSearch_tab",
+        "🔍 Search Gene:",
+        choices = NULL,
+        multiple = TRUE,
+        options = list(
+          placeholder = paste0("Type gene names ..."),
+          openOnFocus = FALSE,
+          closeAfterSelect = TRUE,
+          plugins = list("remove_button"),
+          maxItems = 15
+        )
+      )
+    }
+  })
+
+  observeEvent(values$lazy_data, {
+    req(values$lazy_data)
+    
+    updateSelectizeInput(
+      session,
+      "geneSearch_tab",
+      choices = values$lazy_data$genes,
+      server = TRUE
+    )
+  })
+
+  # Group by
+  output$gene_group_by_ui <- renderUI({
+    selectInput("gene_group_by", "Group by:",
+      choices = categorical_vars(),
+      selected = categorical_vars()[1]
+    )
+  })
+
+  # Reactive to prepare data for plotting
+  gene_expression_data <- reactive({
+    req(input$geneSearch_tab)
+    genes <- input$geneSearch_tab
+
+    # Get expression per cell for all selected genes
+    expr_list <- lapply(genes, function(g) {
+      values$lazy_data$get_gene_expression(gene_name = g)
+    })
+    mat <- do.call(cbind, expr_list)
+    colnames(mat) <- genes
+    
+    # Get grouping variable
+    group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$gene_group_by)
+    
+    # Build long-format data frame
+    df <- data.frame(group = group_var, mat)
+    long_df <- melt(df, id.vars = "group", variable.name = "gene", value.name = "expression")
+    return(long_df)
+  })
+
+  output$gene_main_plot <- renderPlot({
+    req(gene_expression_data())
+    df <- gene_expression_data()
+    
+    # Base ggplot
+    p <- ggplot(df, aes(x = group, y = expression, fill = group)) +
+      facet_wrap(~ gene, scales = "free_y") +
+      labs(x = "Group", y = "Expression Level") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "none")
+    
+    # Add either violin or boxplot layer
+    if (input$gene_plot_type == "violin") {
+      p <- p + geom_violin(scale = "width", trim = TRUE)
+    } else {
+      p <- p + geom_boxplot(outlier.size = 0.5)
+    }
+    
+    # Add individual points if selected
+    if (input$gene_show_points) {
+      p <- p + geom_jitter(size = input$gene_point_size, width = 0.2, alpha = 0.5)
+    }
+    
+    # Apply log scale if selected
+    if (input$gene_log_scale) {
+      p <- p + scale_y_continuous(trans = "log1p")  # log1p handles zeros better
+    }
+    
+    # Title based on plot type
+    title_text <- ifelse(input$gene_plot_type == "violin", 
+                        "Gene Expression (Violin Plot)", 
+                        "Gene Expression (Box Plot)")
+    p <- p + labs(title = title_text)
+    
+    p
+  })
+
+
   # qc_main_plot
 
   # Reactive data for main plot — returns different data frames depending on plot type

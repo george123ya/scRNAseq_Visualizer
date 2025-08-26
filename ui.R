@@ -155,7 +155,21 @@ ui <- fluidPage(
             span(class = "collapse-icon", "▼")
           ),
           div(id = "gene-section", class = "collapsible-content",
-            uiOutput("geneSearchUI"),
+            # uiOutput("geneSearchUI"),
+            selectizeInput(
+              "geneSearch",
+              "🔍 Search Gene:",
+              choices = NULL,
+              multiple = TRUE,
+              options = list(
+                placeholder = "Type gene names...",
+                create = TRUE,            # <--- this makes Enter immediate
+                openOnFocus = FALSE,
+                closeAfterSelect = TRUE,
+                plugins = list("remove_button"),
+                maxItems = 15
+              )
+            ),
             uiOutput("colorByUI"),
             div(class = "mt-2",
               checkboxInput("activateMAGIC", 
@@ -163,6 +177,85 @@ ui <- fluidPage(
                 value = FALSE),
               tags$small(class = "text-muted", 
                 "Note: For visualization only, not for statistical analysis")
+            )
+          )
+        )
+      ),
+
+      # Gene Expression Tab Controls
+      conditionalPanel(
+        condition = "input.main_tabs == 'gene_expression'",
+        div(class = "collapsible-section",
+          div(class = "collapsible-header", onclick = "toggleCollapse('gene-params-section')",
+            span(class = "section-header", "🔍 Gene Plot Parameters"),
+            span(class = "collapse-icon", "▼")
+          ),
+          div(id = "gene-params-section", class = "collapsible-content",
+            conditionalPanel(
+              condition = "input.qc_plot_type != 'scatter'",
+              uiOutput("gene_selected_ui"),
+              uiOutput("gene_group_by_ui")
+            ),
+            
+            # Plot type selection
+            radioButtons("gene_plot_type", "Plot Type:",
+              choices = list(
+                "Violin Plot" = "violin",
+                "Box Plot" = "box"
+              ),
+              selected = "violin",
+              inline = TRUE
+            ),
+
+            checkboxInput("gene_show_points", "Show individual points", value = TRUE),
+            checkboxInput("gene_log_scale", "Log scale (where applicable)", value = FALSE),
+            sliderInput("gene_point_size", "Point size:", 
+              min = 0.1, max = 2, value = 0.5, step = 0.1)
+          )
+        )
+      ),
+
+      # Heatmap
+
+      conditionalPanel(
+        condition = "input.main_tabs == 'gene_expression'",
+        # Gene Search and Visualization - Collapsible
+        div(class = "collapsible-section",
+          div(
+            class = "collapsible-header",
+            onclick = "toggleCollapse('heatmap-section')",
+            span(class = "section-header", "Heatmap"),
+            span(class = "collapse-icon", "▼")
+          ),
+          div(
+            id = "heatmap-section",
+            class = "collapsible-content",
+            
+            # Gene selection input
+            textInput(
+              "heatmap_genes", 
+              label = "Genes to visualize:", 
+              placeholder = "Enter comma-separated gene names (e.g. KRT10, BRCA2)"
+            ),
+            
+            # Clustering selection (dynamic)
+            uiOutput("heatmap_cluster_by_ui"),
+            
+            # Scale selection
+            radioButtons(
+              "heatmap_score", 
+              label = "Scale values by:", 
+              choices = c("Z-score" = "z_score", "Log" = "log"),
+              selected = "z_score",
+              inline = TRUE
+            ),
+            
+            # Update button
+            actionButton(
+              "update_heatmap", 
+              "Update Heatmap", 
+              class = "btn btn-primary btn-sm",
+              style = "margin-top: 8px;"
             )
           )
         )
@@ -314,8 +407,26 @@ ui <- fluidPage(
           tags$div(id = "legendsContainer", style = "margin-top: 15px;"),
           verbatimTextOutput("selected_points")
         ),
-        
-        # Quality Control Tab
+
+        # Gene Expression Tab
+        tabPanel("📊 Gene Expression", value = "gene_expression",
+          div(style = "margin-top: 20px;",
+            h3("📈 Gene Expression Overview"),
+            p("Visualize and compare gene expression levels across different cell groups using interactive plots."),
+            fluidRow(
+              # Main plots
+              column(8,
+                div(class = "gene-plots",
+                  h4("Expression Distribution"),
+                  plotOutput("gene_main_plot", height = "400px"),
+                  tags$hr(),
+                  h4("Expression Heatmap"),
+                  plotOutput("heatmapPlot", height = "400px")
+                )
+              )
+            )
+          )
+        ),
         tabPanel("🔍 Quality Control", value = "qc",
           div(style = "margin-top: 15px;",
             
