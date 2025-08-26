@@ -54,9 +54,9 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-use_condaenv("sc_rna_env_python2", required = TRUE)
+# use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-# use_condaenv("shiny_app_env", required = TRUE)
+use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
@@ -1530,44 +1530,27 @@ server <- function(input, output, session) {
 
   # --- Gene Search ---
   
-  # UI: Gene search
-  # output$geneSearchUI <- renderUI({
-  #   if (is.null(values$lazy_data)) {
-  #     selectizeInput("geneSearch", "🔍 Search Gene:",
-  #                   choices = list("Initialize dataset first..." = "loading"),
-  #                   multiple = TRUE)
-  #   } else {
-  #     # UI (static)
-  #     selectizeInput(
-  #       "geneSearch",
-  #       "🔍 Search Gene:",
-  #       choices = NULL,
-  #       multiple = TRUE,
-  #       options = list(
-  #         placeholder = "Type gene names...",
-  #         openOnFocus = FALSE,
-  #         closeAfterSelect = TRUE,
-  #         plugins = list("remove_button"),
-  #         maxItems = 15
-  #       )
-  #     )
-  #   }
-  # })
-
-  # Update gene choices when data is loaded
-  observeEvent(values$lazy_data, {
-    req(values$lazy_data)
-    updateSelectizeInput(
-      session,
-      "geneSearch",
-      choices = genes_server(),  # do not push everything
-      server = TRUE
-    )
-  })
-
-  genes_server <- reactive({
-    req(values$lazy_data)
-    values$lazy_data$genes   # full list stored in R, not browser
+  output$geneSearchUI <- renderUI({
+    if (is.null(values$lazy_data)) {
+      shinyWidgets::virtualSelectInput(
+        "geneSearch", "🔍 Search Gene:",
+        choices = "Initialize dataset first...",
+        multiple = TRUE,
+        search = TRUE,
+        searchPlaceholderText = "Type gene names...",
+        maxValues = 4
+      )
+    } else {
+      shinyWidgets::virtualSelectInput(
+        "geneSearch", "🔍 Search Gene:",
+        choices = values$lazy_data$genes,
+        multiple = TRUE,
+        search = TRUE,
+        searchPlaceholderText = "Type gene names...",
+        maxValues = 4,
+        showValueAsTags = TRUE
+      )
+    }
   })
 
   # UPDATED: Gene search observer with smart extraction
@@ -1983,12 +1966,13 @@ server <- function(input, output, session) {
     mat <- do.call(cbind, expr_list)
     colnames(mat) <- genes
     
-    # Get grouping variable
+    # Get grouping variable and force categorical
     group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$gene_group_by)
-    
+    group_var <- as.factor(group_var)  # <-- key line
+
     # Build long-format data frame
     df <- data.frame(group = group_var, mat)
-    long_df <- melt(df, id.vars = "group", variable.name = "gene", value.name = "expression")
+    long_df <- reshape2::melt(df, id.vars = "group", variable.name = "gene", value.name = "expression")
     return(long_df)
   })
 

@@ -20,6 +20,8 @@ dependencies:
   - r-xml2
   - r-ps
   - r-future
+  - r-reshape2
+  - r-shinywidgets
   - pip
   - zlib 
   - requests

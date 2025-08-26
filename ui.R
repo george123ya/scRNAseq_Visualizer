@@ -155,21 +155,21 @@ ui <- fluidPage(
             span(class = "collapse-icon", "▼")
           ),
           div(id = "gene-section", class = "collapsible-content",
-            # uiOutput("geneSearchUI"),
-            selectizeInput(
-              "geneSearch",
-              "🔍 Search Gene:",
-              choices = NULL,
-              multiple = TRUE,
-              options = list(
-                placeholder = "Type gene names...",
-                create = TRUE,            # <--- this makes Enter immediate
-                openOnFocus = FALSE,
-                closeAfterSelect = TRUE,
-                plugins = list("remove_button"),
-                maxItems = 15
-              )
-            ),
+            uiOutput("geneSearchUI"),
+            # selectizeInput(
+            #   "geneSearch",
+            #   "🔍 Search Gene:",
+            #   choices = NULL,
+            #   multiple = TRUE,
+            #   options = list(
+            #     placeholder = "Type gene names...",
+            #     create = TRUE,            # <--- this makes Enter immediate
+            #     openOnFocus = FALSE,
+            #     closeAfterSelect = TRUE,
+            #     plugins = list("remove_button"),
+            #     maxItems = 15
+            #   )
+            # ),
             uiOutput("colorByUI"),
             div(class = "mt-2",
               checkboxInput("activateMAGIC", 
