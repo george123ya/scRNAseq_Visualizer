@@ -22,6 +22,7 @@ dependencies:
   - r-future
   - r-reshape2
   - r-shinywidgets
+  - bioconda::bioconductor-complexheatmap
   - pip
   - zlib 
   - requests

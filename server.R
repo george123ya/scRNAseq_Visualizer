@@ -1847,7 +1847,7 @@ server <- function(input, output, session) {
   output$heatmap_cluster_by_ui <- renderUI({
     selectizeInput(
       "heatmap_cluster_by", "Cluster by:",
-      choices = c('None', categorical_vars()),
+      choices = c(categorical_vars()),
       options = list(
         placeholder = 'Select a grouping variable...',
         onInitialize = I('function() { this.setValue(""); }')
@@ -1915,35 +1915,24 @@ server <- function(input, output, session) {
   # UI: Gene search
   output$gene_selected_ui <- renderUI({
     if (is.null(values$lazy_data)) {
-      selectizeInput("geneSearch_tab", "🔍 Search Gene:",
-                    choices = list("Initialize dataset first..." = "loading"),
-                    multiple = TRUE)
-    } else {
-      selectizeInput(
-        "geneSearch_tab",
-        "🔍 Search Gene:",
-        choices = NULL,
+      shinyWidgets::virtualSelectInput(
+        "geneSearch_tab", "🔍 Search Gene:",
+        choices = "Initialize dataset first...",
         multiple = TRUE,
-        options = list(
-          placeholder = paste0("Type gene names ..."),
-          openOnFocus = FALSE,
-          closeAfterSelect = TRUE,
-          plugins = list("remove_button"),
-          maxItems = 15
-        )
+        search = TRUE,
+        searchPlaceholderText = "Type gene names ...",
+        maxValues = 15
+      )
+    } else {
+      shinyWidgets::virtualSelectInput(
+        "geneSearch_tab", "🔍 Search Gene:",
+        choices = values$lazy_data$genes,
+        multiple = TRUE,
+        search = TRUE,
+        searchPlaceholderText = "Type gene names ...",
+        maxValues = 15
       )
     }
-  })
-
-  observeEvent(values$lazy_data, {
-    req(values$lazy_data)
-    
-    updateSelectizeInput(
-      session,
-      "geneSearch_tab",
-      choices = values$lazy_data$genes,
-      server = TRUE
-    )
   })
 
   # Group by
