@@ -32,6 +32,7 @@ suppressPackageStartupMessages({
   library(shiny)
   # library(shinydashboard)
   # library(DT)
+  library(shinyjs)
   library(tidyr)
   library(base64enc)
   library(viridisLite)
@@ -54,13 +55,14 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-# use_condaenv("sc_rna_env_python2", required = TRUE)
+use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-use_condaenv("shiny_app_env", required = TRUE)
+# use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
 import numpy as np
+from scipy.sparse import csc_matrix, hstack
 
 def get_gene_fast(z_csc, gene_index, layer='X'):
     # Get number of cells
@@ -89,6 +91,95 @@ def get_gene_fast(z_csc, gene_index, layer='X'):
     expression[cell_indices] = values
     
     return expression
+
+# Optimized get_genes_batch for non-contiguous indices
+def get_genes_batch(z_csc, gene_indices, layer='X', batch_size=1000):
+    n_cells = z_csc['obs'][next(iter(z_csc['obs'].array_keys()))].shape[0]
+    csc = z_csc['X'] if layer == 'X' else z_csc['layers'][layer]
+    
+    # Cache indptr to reduce cloud fetches
+    indptr = csc['indptr'][:]
+    indices = csc['indices']
+    data = csc['data']
+    
+    # Sort gene indices
+    sorted_indices = sorted(enumerate(gene_indices), key=lambda x: x[1])
+    sorted_genes = [x[1] for x in sorted_indices]
+    original_order = [x[0] for x in sorted_indices]
+    
+    if not sorted_genes:
+        return csc_matrix((n_cells, 0), dtype=np.float32)
+    
+    # Initialize lists for non-zero entries
+    all_row_indices = []
+    all_col_indices = []
+    all_data_values = []
+    
+    # Process genes in batches
+    for batch_start in range(0, len(sorted_genes), batch_size):
+        batch_end = min(batch_start + batch_size, len(sorted_genes))
+        batch_genes = sorted_genes[batch_start:batch_end]
+        
+        if not batch_genes:
+            continue
+        
+        # Get the range of data we need to fetch
+        min_gene = batch_genes[0]
+        max_gene = batch_genes[-1]
+        
+        # Fetch indptr for the full range
+        range_indptr = indptr[min_gene:max_gene+2]
+        start_idx = range_indptr[0]
+        end_idx = range_indptr[-1]
+        
+        if start_idx < end_idx:
+            # Fetch the contiguous block of data
+            batch_indices = indices[start_idx:end_idx]
+            batch_data = data[start_idx:end_idx]
+        else:
+            batch_indices = np.array([], dtype=np.int32)
+            batch_data = np.array([], dtype=np.float32)
+        
+        # Process each gene in this batch
+        for local_i, gene_idx in enumerate(batch_genes):
+            # Calculate relative position within the fetched range
+            rel_pos = gene_idx - min_gene
+            s_rel = range_indptr[rel_pos] - start_idx
+            e_rel = range_indptr[rel_pos + 1] - start_idx
+            
+            if s_rel < e_rel:
+                # Global column index (position in the sorted list)
+                global_col_idx = batch_start + local_i
+                
+                # Extract data for this specific gene
+                gene_row_indices = batch_indices[s_rel:e_rel]
+                gene_data = batch_data[s_rel:e_rel]
+                
+                # Add to global lists
+                all_row_indices.append(gene_row_indices)
+                all_col_indices.append(np.full(len(gene_row_indices), global_col_idx, dtype=np.int32))
+                all_data_values.append(gene_data)
+    
+    # Combine all non-zero entries
+    if not all_row_indices:
+        return csc_matrix((n_cells, len(gene_indices)), dtype=np.float32)
+    
+    all_row_indices = np.concatenate(all_row_indices)
+    all_col_indices = np.concatenate(all_col_indices)
+    all_data_values = np.concatenate(all_data_values)
+    
+    # Create final sparse matrix
+    result_mat = csc_matrix(
+        (all_data_values, (all_row_indices, all_col_indices)),
+        shape=(n_cells, len(gene_indices)),
+        dtype=np.float32
+    )
+    
+    # Reorder columns to match original gene_indices order
+    inverse_order = np.argsort(original_order)
+    result_mat = result_mat[:, inverse_order]
+    
+    return result_mat.toarray()
 ")
 
 # ==============================================================================
@@ -172,12 +263,10 @@ process_zarr_data_fast <- function(z, file_path) {
   
   # Handle different Zarr structures
   if ("obs" %in% zarr_keys && "var" %in% zarr_keys) {
-    # Standard AnnData Zarr structure
     obs_group <- z[["obs"]]
     var_group <- z[["var"]]
     X_array <- z[["X"]]
   } else {
-    # Look for alternative structures
     cat("⚠️ Non-standard Zarr structure detected\n")
     stop("❌ Could not find standard obs/var/X structure in Zarr file")
   }
@@ -208,7 +297,6 @@ process_zarr_data_fast <- function(z, file_path) {
   
   # Get available obs columns
   obs_columns <- get_obs_columns_fast(obs_group)
-  # print(obs_columns)
   cat("🔑 Available obs columns:", paste(head(obs_columns, 10), collapse = ", "), 
       if(length(obs_columns) > 10) "..." else "", "\n")
   
@@ -222,6 +310,37 @@ process_zarr_data_fast <- function(z, file_path) {
   
   # Load SEACells if available
   seacell_df <- load_seacells_fast(z, zarr_keys)
+  
+  # Load pathway data
+  # if (!requireNamespace("msigdbr", quietly = TRUE)) {
+  #   cat("⚠️ Installing msigdbr for pathway data...\n")
+  #   install.packages("msigdbr")
+  # }
+  # library(msigdbr)
+  
+  # pathways_df <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME")
+  # pathways <- split(pathways_df$gene_symbol, pathways_df$gs_name)
+  # cat("🛤️ Loaded", length(pathways), "Reactome pathways\n")
+  
+  # # Filter pathways
+  # valid_genes <- toupper(gene_info$display_names)
+  # pathways <- lapply(pathways, function(genes) intersect(toupper(genes), valid_genes))
+  # pathways <- pathways[sapply(pathways, length) > 0]
+  # cat("🛤️ Retained", length(pathways), "pathways with valid genes\n")
+  
+  # Create shortened pathway names
+  # pathway_names <- names(pathways)
+  # pathway_display_names <- sub("^REACTOME_", "", pathway_names)  # Remove REACTOME_ prefix
+  # pathway_display_names <- sapply(pathway_display_names, function(name) {
+  #   if (nchar(name) > 30) paste0(substr(name, 1, 27), "...") else name
+  # })
+  # names(pathways) <- pathway_names  # Keep full names as keys
+  # pathway_map <- data.frame(
+  #   full_name = pathway_names,
+  #   display_name = pathway_display_names,
+  #   stringsAsFactors = FALSE
+  # )
+  # cat("🛤️ Sample display names:", paste(head(pathway_display_names, 5), collapse = ", "), "\n")
   
   # Create fast access functions
   get_obs_column_fast <- function(z, name) {
@@ -239,32 +358,28 @@ process_zarr_data_fast <- function(z, file_path) {
     col_obj <- z[["obs"]][[name]]
     
     tryCatch({
-      # If it has 'codes' and 'categories', treat as categorical
       zarr <- import("zarr")
-      # Assign to Python environment
       py$col_obj <- col_obj
       py$zarr <- zarr
       
-      # Check if it's a group (categorical)
       is_group <- py_eval("isinstance(col_obj, zarr.Group)")
-
+      
       if (is_group) {
         codes <- to_r(col_obj[['codes']][])
         categories <- to_r(col_obj[['categories']][])
-        return(categories[codes + 1])  # R is 1-indexed
+        return(categories[codes + 1])
       } else {
-        # Numeric / array column
         return(to_r(col_obj[]))
       }
     }, error = function(e) {
-      cat("⚠️ Could not load obs column", name, ":", e$message, "\n")
+      cat("⚠️ Error loading obs column", name, ":", e$message, "\n")
       return(NULL)
     })
   }
-
-
+  
   get_gene_expression_fast <- function(gene_name, layer = "X") {
     gene_idx <- match(gene_name, gene_info$display_names)
+    cat("🔍 Looking for gene:", gene_name, "Found at index:", gene_idx, "\n")
     if (is.na(gene_idx)) {
       cat("❌ Gene", gene_name, "not found\n")
       return(NULL)
@@ -272,8 +387,6 @@ process_zarr_data_fast <- function(z, file_path) {
     
     tryCatch({
       if (layer == "X") {
-        # Ultra-fast lazy extraction via Dask-style block processing
-        # expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1))
         peak <- peakRAM({
           expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1), 'X')
         })
@@ -284,20 +397,41 @@ process_zarr_data_fast <- function(z, file_path) {
           cat("❌ Layer", layer, "not available\n")
           return(NULL)
         }
-        # expr_vec <- py_to_r(z['layers'][[layer]][, as.integer(gene_idx - 1)])
         expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1), layer)
-        return(expr_vec)
+        return(py_to_r(expr_vec))
       }
-      
     }, error = function(e) {
       cat("⚠️ Error loading expression for", gene_name, ":", e$message, "\n")
       return(NULL)
     })
   }
-
-
-
-
+  
+  get_genes_expression_batch <- function(gene_names, layer = "X") {
+    gene_indices <- match(gene_names, gene_info$display_names)
+    valid_mask <- !is.na(gene_indices)
+    valid_indices <- as.integer(gene_indices[valid_mask] - 1)  # Ensure integer indices
+    valid_genes <- gene_names[valid_mask]
+    
+    if (length(valid_indices) == 0) {
+      cat("❌ No valid genes found in batch\n")
+      return(NULL)
+    }
+    
+    tryCatch({
+      peak <- peakRAM({
+        expr_mat <- reticulate::py$get_genes_batch(z, valid_indices, layer)
+      })
+      print(peak)
+      expr_mat <- py_to_r(expr_mat)
+      colnames(expr_mat) <- valid_genes
+      cat("📏 Batch retrieved expression for", length(valid_genes), "genes\n")
+      return(expr_mat)
+    }, error = function(e) {
+      cat("⚠️ Error loading batch expression:", e$message, "\n")
+      cat("Run `reticulate::py_last_error()` for details.\n")
+      return(NULL)
+    })
+  }
   
   get_obsm_fast <- function(key) {
     if (!(key %in% obsm_keys)) return(NULL)
@@ -311,21 +445,25 @@ process_zarr_data_fast <- function(z, file_path) {
   
   list(
     df = umap_coords,
-    obs = NULL,  # Don't preload obs data
+    obs = NULL,
     var = gene_info$var_df,
     genes = gene_info$display_names,
     gene_info = gene_info,
-    zarr_obj = z,  # Keep Zarr object for direct access
+    zarr_obj = z,
     seacell_df = seacell_df,
     obs_keys = obs_columns,
     available_layers = layer_keys,
     obsm_keys = obsm_keys,
     file_path = file_path,
     is_zarr = TRUE,
-    # Fast access functions
     get_obs_column = get_obs_column_fast,
     get_gene_expression = get_gene_expression_fast,
-    get_obsm = get_obsm_fast
+    get_genes_expression_batch = get_genes_expression_batch,
+    get_obsm = get_obsm_fast,
+    # pathways = pathways,
+    # pathway_map = pathway_map,  # Add mapping of full to display names
+    n_cells = n_cells,
+    n_genes = n_genes
   )
 }
 
@@ -661,17 +799,16 @@ process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
   shape <- ad_obj$obs$shape
   n_cells <- shape[[1]]
   n_cols <- shape[[2]]
-  # cat("📋 Observation metadata shape:", n_cells, "cells,", n_cols, "columns\n")
+  cat("📋 Observation metadata shape:", n_cells, "cells,", n_cols, "columns\n")
   
   # Get obs column names lazily
   obs_cols <- py_to_r(ad_obj$obs$columns$to_list())
-  # cat("🔑 Available obs columns:", paste(obs_cols, collapse = ", "), "\n")
+  cat("🔑 Available obs columns:", paste(obs_cols, collapse = ", "), "\n")
   
   # Helper to get single obs column safely as R vector
-  get_obs_column <- function(name) {
+  get_obs_column <- function(z, name) {
     if (!(name %in% obs_cols)) return(NULL)
     col_py <- ad_obj$obs[[name]]
-    # Convert lazy-backed col to pandas Series (materialize)
     col_pd <- pd$Series(col_py)
     return(py_to_r(col_pd))
   }
@@ -679,19 +816,34 @@ process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
   # Load var info and process gene names
   var_df <- py_to_r(ad_obj$var)
   gene_info <- process_gene_names(ad_obj)
+  cat("🧬 Found", length(gene_info$display_names), "genes\n")
   
-  # cat("🧬 Found", length(gene_info$display_names), "genes\n")
+  # # Load pathway data (e.g., Reactome pathways via msigdbr)
+  # if (!requireNamespace("msigdbr", quietly = TRUE)) {
+  #   cat("⚠️ Installing msigdbr for pathway data...\n")
+  #   install.packages("msigdbr")
+  # }
+  # library(msigdbr)
+  
+  # # Load Reactome pathways for human (adjust species if needed)
+  # pathways_df <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME")
+  # pathways <- split(pathways_df$gene_symbol, pathways_df$gs_name)
+  # cat("🛤️ Loaded", length(pathways), "Reactome pathways\n")
+  
+  # # Filter pathways to include only genes present in the dataset
+  # valid_genes <- toupper(gene_info$display_names)
+  # pathways <- lapply(pathways, function(genes) intersect(toupper(genes), valid_genes))
+  # pathways <- pathways[sapply(pathways, length) > 0]  # Keep only non-empty pathways
+  # cat("🛤️ Retained", length(pathways), "pathways with valid genes\n")
   
   # Get obsm keys
   obsm_keys <- py_to_r(ad_obj$obsm_keys())
-  # cat("🗝️ Available obsm keys:", paste(obsm_keys, collapse = ", "), "\n")
+  cat("🗝️ Available obsm keys:", paste(obsm_keys, collapse = ", "), "\n")
   
   # Load UMAP coordinates
   umap_keys <- c("X_umap_normal", "X_umap", "X_umap_magic")
   umap <- NULL
   umap_key_used <- NULL
-
-  # Time the UMAP coordinate loading
   umap_start <- Sys.time()
   for (k in umap_keys) {
     if (k %in% obsm_keys) {
@@ -707,7 +859,7 @@ process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
   }
   umap_end <- Sys.time()
   cat("  ⏱ UMAP coordinate loading took:", round(difftime(umap_end, umap_start, units = "secs"), 3), "seconds\n")
-
+  
   if (is.null(umap)) stop("❌ No UMAP coordinates found.")
   
   df <- as.data.frame(umap)
@@ -719,22 +871,22 @@ process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
       umap_magic <- py_to_r(ad_obj$obsm[["X_umap_magic"]])
       df$magic_x <- umap_magic[, 1]
       df$magic_y <- umap_magic[, 2]
-      # cat("✨ Loaded MAGIC UMAP coordinates\n")
+      cat("✨ Loaded MAGIC UMAP coordinates\n")
     } else {
       df$magic_x <- df$x
       df$magic_y <- df$y
-      # cat("✨ Using main UMAP as MAGIC coordinates\n")
+      cat("✨ Using main UMAP as MAGIC coordinates\n")
     }
   } else {
     df$magic_x <- NA
     df$magic_y <- NA
-    # cat("⚠️ MAGIC UMAP coordinates not found\n")
+    cat("⚠️ MAGIC UMAP coordinates not found\n")
   }
   
   # Expression layers
   layers_py <- ad_obj$layers$keys()
   available_layers <- reticulate::py_to_r(reticulate::import_builtins()$list(layers_py))
-  # cat("📋 Available layers:", paste(available_layers, collapse = ", "), "\n")
+  cat("📋 Available layers:", paste(available_layers, collapse = ", "), "\n")
   
   # SEACells summary
   seacell_df <- NULL
@@ -755,10 +907,10 @@ process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
   
   list(
     df = df,
-    obs = NULL,          # Don't keep full obs loaded (too large, use get_obs_column)
+    obs = NULL,
     var = var_df,
-    genes = gene_info$display_names,         # What user sees in UI
-    gene_info = gene_info,                   # Complete gene mapping info
+    genes = gene_info$display_names,
+    gene_info = gene_info,
     ad_obj = ad_obj,
     seacell_df = seacell_df,
     obs_keys = obs_cols,
@@ -766,7 +918,8 @@ process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
     obsm_keys = obsm_keys,
     file_path = file_path,
     is_zarr = is_zarr,
-    get_obs_column = get_obs_column  # export this function for user to get columns lazily
+    get_obs_column = get_obs_column,
+    # pathways = pathways  # Add pathways to the returned list
   )
 }
 
@@ -1266,6 +1419,7 @@ server <- function(input, output, session) {
     })
   })
 
+  # UI: Dataset selection
   output$datasetUI <- renderUI({
     folder_path <- "./processed_data"
     local_files <- character()
@@ -1529,26 +1683,27 @@ server <- function(input, output, session) {
   })
 
   # --- Gene Search ---
-  
+
+  # UI: Gene search for visualization tab
   output$geneSearchUI <- renderUI({
+    message("Rendering geneSearchUI") # Debug
     if (is.null(values$lazy_data)) {
-      shinyWidgets::virtualSelectInput(
-        "geneSearch", "🔍 Search Gene:",
-        choices = "Initialize dataset first...",
-        multiple = TRUE,
-        search = TRUE,
-        searchPlaceholderText = "Type gene names...",
-        maxValues = 4
+      selectizeInput("geneSearch", "🔍 Search Gene:",
+                    choices = list("Initialize dataset first..." = "loading"),
+                    multiple = TRUE
       )
     } else {
-      shinyWidgets::virtualSelectInput(
-        "geneSearch", "🔍 Search Gene:",
-        choices = values$lazy_data$genes,
-        multiple = TRUE,
-        search = TRUE,
-        searchPlaceholderText = "Type gene names...",
-        maxValues = 4,
-        showValueAsTags = TRUE
+      selectizeInput("geneSearch", "🔍 Search Gene:",
+                    choices = NULL, # Rely on server-side updates
+                    multiple = TRUE,
+                    options = list(
+                      placeholder = "Type gene names...",
+                      openOnFocus = FALSE,
+                      closeAfterSelect = TRUE,
+                      plugins = list("remove_button"),
+                      maxItems = 15,
+                      onInitialize = I("function() { console.log('geneSearch initialized'); }") # Debug
+                    )
       )
     }
   })
@@ -1843,62 +1998,527 @@ server <- function(input, output, session) {
   })
 
 
-  # UI select for clustering
-  output$heatmap_cluster_by_ui <- renderUI({
+  manual_genesets <- reactiveVal(list())
+
+  # Add manual gene set
+  observeEvent(input$add_manual_geneset, {
+    req(input$manual_geneset_name, input$manual_geneset_genes)
+    
+    name <- trimws(input$manual_geneset_name)
+    genes <- toupper(trimws(unlist(strsplit(input$manual_geneset_genes, ",|\\s+"))))
+    
+    if (name != "" && length(genes) > 0) {
+      current_sets <- manual_genesets()
+      current_sets[[name]] <- genes
+      manual_genesets(current_sets)
+      
+      # Clear inputs
+      updateTextInput(session, "manual_geneset_name", value = "")
+      updateTextInput(session, "manual_geneset_genes", value = "")
+      
+      # Update selectize choices
+      updateSelectizeInput(session, "selected_manual_genesets", 
+                          choices = names(current_sets),
+                          selected = input$selected_manual_genesets)
+    }
+  })
+
+  # Display manual gene sets
+  output$manual_genesets_display <- renderUI({
+    sets <- manual_genesets()
+    if (length(sets) == 0) {
+      return(p("No custom gene sets added yet.", style = "color: #666;"))
+    }
+    
+    set_displays <- lapply(names(sets), function(name) {
+      genes_text <- paste(sets[[name]], collapse = ", ")
+      if (nchar(genes_text) > 50) {
+        genes_text <- paste0(substr(genes_text, 1, 47), "...")
+      }
+      
+      div(
+        style = "margin-bottom: 5px; padding: 5px; background-color: #f8f9fa; border-left: 3px solid #007bff;",
+        strong(name), ": ", genes_text,
+        actionButton(paste0("remove_", name), "×", 
+                    class = "btn btn-danger btn-xs pull-right",
+                    style = "padding: 1px 6px; font-size: 10px;",
+                    onclick = paste0("Shiny.setInputValue('remove_manual_geneset', '", name, "');"))
+      )
+    })
+    
+    do.call(tagList, set_displays)
+  })
+
+  # Remove manual gene set
+  observeEvent(input$remove_manual_geneset, {
+    current_sets <- manual_genesets()
+    current_sets[[input$remove_manual_geneset]] <- NULL
+    manual_genesets(current_sets)
+    
+    # Update selectize choices
+    updateSelectizeInput(session, "selected_manual_genesets", 
+                        choices = names(current_sets),
+                        selected = setdiff(input$selected_manual_genesets, input$remove_manual_geneset))
+  })
+
+  # Check if manual gene sets exist
+  output$has_manual_genesets <- reactive({
+    return(length(manual_genesets()) > 0)
+  })
+  outputOptions(output, "has_manual_genesets", suspendWhenHidden = FALSE)
+
+  # UI select for clustering (with alphabetical ordering)
+  output$heatmap_cluster_by_ui_panel1 <- renderUI({
+    req(values$lazy_data$obs_keys)
+    choices <- sort(values$lazy_data$obs_keys)
     selectizeInput(
-      "heatmap_cluster_by", "Cluster by:",
-      choices = c(categorical_vars()),
+      "heatmap_cluster_by_panel1",
+      "Cluster or color by:",
+      choices = choices,
       options = list(
-        placeholder = 'Select a grouping variable...',
-        onInitialize = I('function() { this.setValue(""); }')
+        placeholder = "Select a grouping variable..."
+        # onInitialize = I('function() { this.setValue(""); }')
       )
     )
   })
 
-  # Data for heatmap
-  heatmap_data <- eventReactive(input$update_heatmap, {
-    req(input$heatmap_genes)
-    
-    # Parse gene list
-    genes <- strsplit(input$heatmap_genes, ",\\s*")[[1]]
-    genes <- genes[genes %in% values$lazy_data$genes]
-    req(length(genes) > 0, "No valid genes found in dataset")
+  output$heatmap_cluster_by_ui_panel2 <- renderUI({
+    req(values$lazy_data$obs_keys)
+    choices <- sort(values$lazy_data$obs_keys)
+    selectizeInput(
+      "heatmap_cluster_by_panel2",
+      "Cluster or color by:",
+      choices = choices,
+      options = list(
+        placeholder = "Select a grouping variable..."
+        # onInitialize = I('function() { this.setValue(""); }')
+      )
+    )
+  })
 
-    # Expression matrix (cells × genes)
-    expr_list <- lapply(genes, function(g) {
-      values$lazy_data$get_gene_expression(gene_name = g)
+  # GMT file loading indicator (Panel 2)
+  output$gmt_loaded_panel2 <- reactive({
+    return(!is.null(input$gmt_file_panel2))
+  })
+  outputOptions(output, "gmt_loaded_panel2", suspendWhenHidden = FALSE)
+
+  # Parse .gmt file (Panel 2)
+  gmt_data_panel2 <- reactive({
+    req(input$gmt_file_panel2)
+    gmt_file <- input$gmt_file_panel2$datapath
+    gmt <- readLines(gmt_file)
+    gene_sets <- lapply(gmt, function(line) {
+      parts <- unlist(strsplit(line, "\t"))
+      list(name = parts[1], genes = toupper(parts[3:length(parts)]))
     })
-    mat <- do.call(cbind, expr_list)
-    colnames(mat) <- genes
-    
-    # Aggregate if cluster_by is chosen
-    if (!is.null(input$heatmap_cluster_by) && input$heatmap_cluster_by != "None") {
-      group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$heatmap_cluster_by)
-      stopifnot(length(group_var) == nrow(mat))
-      # Compute group means
-      mat <- sapply(genes, function(g) tapply(mat[, g], group_var, mean, na.rm = TRUE))
-      mat <- t(mat)  # genes × groups
-    } else {
-      mat <- t(mat)  # genes × cells
-    }
-    
-    # Scale matrix by selected method
-    if (input$heatmap_score == "z_score") {
-      # Scale rows (genes) to z-scores
-      mat <- t(scale(t(mat)))  # row-wise scale
-    } else if (input$heatmap_score == "log") {
-      mat <- log1p(mat)
-    }
-    
-    mat
+    names(gene_sets) <- sapply(gene_sets, function(x) x$name)
+    gene_sets
   })
 
-  # Render heatmap
-  output$heatmapPlot <- renderPlot({
-    req(heatmap_data())
-    library(ComplexHeatmap)
-    Heatmap(heatmap_data(), name = "expression")
+  # UI select for GMT gene sets (Panel 2) - with "All" option
+  output$heatmap_gmt_select_panel2 <- renderUI({
+    req(gmt_data_panel2())
+    gmt_sets <- gmt_data_panel2()
+    set_names <- names(gmt_sets)
+    
+    display_names <- sapply(set_names, function(x) {
+      if (nchar(x) > 60) {
+        paste0(substr(x, 1, 57), "...")
+      } else {
+        x
+      }
+    })
+    names(display_names) <- set_names
+    
+    # Add "All" option at the beginning
+    all_choices <- c("All gene sets" = "ALL", display_names)
+    
+    selectizeInput(
+      "heatmap_gmt_sets_panel2",
+      "Select gene sets:",
+      choices = all_choices,
+      multiple = TRUE,
+      options = list(
+        placeholder = "Select one or more gene sets (or 'All gene sets')...",
+        maxOptions = 500,
+        onInitialize = I('function() { this.setValue(""); }'),
+        onItemAdd = I('function(value, item) {
+          if (value === "ALL") {
+            // If "All" is selected, remove all other selections
+            this.setValue(["ALL"]);
+          } else if (this.getValue().includes("ALL")) {
+            // If other item is selected and "All" is already selected, remove "All"
+            var current = this.getValue();
+            var filtered = current.filter(function(v) { return v !== "ALL"; });
+            filtered.push(value);
+            this.setValue(filtered);
+          }
+        }')
+      )
+    )
   })
+
+  # Heatmap data for Panel 1 (Individual Genes) - with separate update triggers and ignoreNULL
+  heatmap_data_panel1 <- eventReactive({
+    input$update_heatmap_panel1
+    input$update_both_heatmaps
+  }, {
+    withProgress(message = "Updating Panel 1 heatmap...", value = 0, {
+      req(input$heatmap_genes_panel1)
+      incProgress(0.1)
+
+      genes <- toupper(trimws(unlist(strsplit(input$heatmap_genes_panel1, ",|\\s+"))))
+      genes <- genes[genes %in% toupper(values$lazy_data$genes)]
+      req(length(genes) > 0, "No valid genes found in dataset for Panel 1")
+
+      expr_mat <- values$lazy_data$get_genes_expression_batch(genes, layer = "X")
+      if (is.null(expr_mat)) {
+        mat <- matrix(NA, nrow = values$lazy_data$n_cells, ncol = length(genes))
+        colnames(mat) <- genes
+      } else {
+        mat <- expr_mat
+      }
+      
+      incProgress(0.5)
+      process_heatmap_data(mat, input$heatmap_score_panel1, input$heatmap_cell_group_mode_panel1, input$heatmap_cluster_by_panel1)
+    })
+  }, ignoreNULL = FALSE, ignoreInit = FALSE)
+
+  # Heatmap data for Panel 2 (Gene Sets/Pathways) - with separate update triggers and ignoreNULL
+  heatmap_data_panel2 <- eventReactive({
+    input$update_heatmap_panel2
+    input$update_both_heatmaps
+  }, {
+    withProgress(message = "Updating Panel 2 heatmap...", value = 0, {
+      req(input$heatmap_gene_group_mode_panel2)
+      incProgress(0.1)
+
+      gene_groups <- NULL
+      gene_group_names <- NULL
+      
+      # Get actual number of cells from the data structure
+      n_cells_safe <- function() {
+        tryCatch({
+          # Try to get from zarr object first
+          if (!is.null(values$lazy_data$zarr_obj)) {
+            obs_keys <- py_to_r(reticulate::import_builtins()$list(values$lazy_data$zarr_obj[["obs"]]$keys()))
+            if (length(obs_keys) > 0) {
+              first_obs <- values$lazy_data$zarr_obj[["obs"]][[obs_keys[1]]]
+              return(as.integer(py_to_r(first_obs$shape[1])))
+            }
+          }
+          # Fallback to stored value
+          if (is.numeric(values$lazy_data$n_cells)) {
+            return(as.integer(values$lazy_data$n_cells))
+          }
+          # Last resort fallback
+          return(1000L)
+        }, error = function(e) {
+          cat("⚠️ Error getting n_cells, using fallback: 1000\n")
+          return(1000L)
+        })
+      }
+      
+      n_cells_default <- n_cells_safe()
+      
+      if (input$heatmap_gene_group_mode_panel2 == "pathways") {
+        req(input$heatmap_pathway_select_panel2)
+        pathways <- values$lazy_data$pathways
+        
+        # Handle "All" option
+        if ("ALL" %in% input$heatmap_pathway_select_panel2) {
+          gene_groups <- pathways
+        } else {
+          gene_groups <- pathways[input$heatmap_pathway_select_panel2]
+        }
+        
+        # Safe name processing with null checks
+        gene_group_names <- sapply(names(gene_groups), function(x) {
+          if (is.null(x) || is.na(x)) {
+            "Unknown"
+          } else if (nchar(x) > 40) {
+            paste0(substr(x, 1, 37), "...")
+          } else {
+            x
+          }
+        })
+        
+      } else if (input$heatmap_gene_group_mode_panel2 == "custom_gmt") {
+        req(input$heatmap_gmt_sets_panel2)
+        all_gmt <- gmt_data_panel2()
+        
+        # Handle "All" option for GMT
+        if ("ALL" %in% input$heatmap_gmt_sets_panel2) {
+          gene_groups <- all_gmt
+        } else {
+          gene_groups <- all_gmt[input$heatmap_gmt_sets_panel2]
+        }
+        
+        # Safe name processing with null checks
+        gene_group_names <- sapply(names(gene_groups), function(x) {
+          if (is.null(x) || is.na(x)) {
+            "Unknown"
+          } else if (nchar(x) > 40) {
+            paste0(substr(x, 1, 37), "...")
+          } else {
+            x
+          }
+        })
+        
+      } else if (input$heatmap_gene_group_mode_panel2 == "manual") {
+        req(input$selected_manual_genesets)
+        all_manual <- manual_genesets()
+        gene_groups <- all_manual[input$selected_manual_genesets]
+        gene_group_names <- names(gene_groups)
+      }
+      
+      req(length(gene_groups) > 0, "No gene sets selected for Panel 2")
+      incProgress(0.3)
+
+      # Calculate gene set scores - OPTIMIZED for "All" option
+      if (input$heatmap_gene_group_mode_panel2 == "pathways" && "ALL" %in% input$heatmap_pathway_select_panel2) {
+        # Ultra-fast batch processing for all pathways
+        cat("🚀 Processing ALL pathways with batch method...\n")
+        
+        # Get all unique genes from all pathways
+        all_pathway_genes <- unique(unlist(gene_groups))
+        valid_genes <- intersect(toupper(all_pathway_genes), toupper(values$lazy_data$genes))
+        
+        if (length(valid_genes) > 0) {
+          # Get expression for all genes at once
+          all_expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = "X")
+          
+          if (!is.null(all_expr_mat) && nrow(all_expr_mat) > 0) {
+            # Create gene lookup for fast indexing
+            gene_lookup <- setNames(1:ncol(all_expr_mat), toupper(colnames(all_expr_mat)))
+            n_cells_actual <- as.integer(nrow(all_expr_mat))
+            
+            # Calculate pathway scores using pre-loaded expression matrix
+            mat <- sapply(seq_along(gene_groups), function(i) {
+              pathway_genes <- intersect(toupper(gene_groups[[i]]), names(gene_lookup))
+              if (length(pathway_genes) > 0) {
+                # Get indices of pathway genes in the expression matrix
+                gene_indices <- gene_lookup[pathway_genes]
+                gene_indices <- gene_indices[!is.na(gene_indices)]
+                
+                if (length(gene_indices) > 0) {
+                  rowMeans(all_expr_mat[, gene_indices, drop = FALSE], na.rm = TRUE)
+                } else {
+                  rep(0, n_cells_actual)
+                }
+              } else {
+                rep(0, n_cells_actual)
+              }
+            })
+          } else {
+            # Fallback if matrix loading failed
+            mat <- matrix(0, nrow = n_cells_default, ncol = length(gene_groups))
+          }
+        } else {
+          # No valid genes found
+          mat <- matrix(0, nrow = n_cells_default, ncol = length(gene_groups))
+        }
+      } else if (input$heatmap_gene_group_mode_panel2 == "custom_gmt" && "ALL" %in% input$heatmap_gmt_sets_panel2) {
+        # Ultra-fast batch processing for all GMT gene sets
+        cat("🚀 Processing ALL GMT gene sets with batch method...\n")
+        
+        # Get all unique genes from all gene sets
+        all_geneset_genes <- unique(unlist(lapply(gene_groups, function(x) {
+          if (is.list(x) && "genes" %in% names(x)) x$genes else x
+        })))
+        valid_genes <- intersect(toupper(all_geneset_genes), toupper(values$lazy_data$genes))
+        
+        if (length(valid_genes) > 0) {
+          # Get expression for all genes at once
+          all_expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = "X")
+          
+          if (!is.null(all_expr_mat) && nrow(all_expr_mat) > 0) {
+            # Create gene lookup for fast indexing
+            gene_lookup <- setNames(1:ncol(all_expr_mat), toupper(colnames(all_expr_mat)))
+            n_cells_actual <- as.integer(nrow(all_expr_mat))
+            
+            # Calculate gene set scores using pre-loaded expression matrix
+            mat <- sapply(seq_along(gene_groups), function(i) {
+              if (is.list(gene_groups[[i]]) && "genes" %in% names(gene_groups[[i]])) {
+                geneset_genes <- intersect(toupper(gene_groups[[i]]$genes), names(gene_lookup))
+              } else {
+                geneset_genes <- intersect(toupper(gene_groups[[i]]), names(gene_lookup))
+              }
+              
+              if (length(geneset_genes) > 0) {
+                # Get indices of gene set genes in the expression matrix
+                gene_indices <- gene_lookup[geneset_genes]
+                gene_indices <- gene_indices[!is.na(gene_indices)]
+                
+                if (length(gene_indices) > 0) {
+                  rowMeans(all_expr_mat[, gene_indices, drop = FALSE], na.rm = TRUE)
+                } else {
+                  rep(0, n_cells_actual)
+                }
+              } else {
+                rep(0, n_cells_actual)
+              }
+            })
+          } else {
+            # Fallback if matrix loading failed
+            mat <- matrix(0, nrow = n_cells_default, ncol = length(gene_groups))
+          }
+        } else {
+          # No valid genes found
+          mat <- matrix(0, nrow = n_cells_default, ncol = length(gene_groups))
+        }
+      } else {
+        # Standard processing for individual selections
+        mat <- sapply(seq_along(gene_groups), function(i) {
+          if (is.list(gene_groups[[i]]) && "genes" %in% names(gene_groups[[i]])) {
+            valid_genes <- intersect(gene_groups[[i]]$genes, toupper(values$lazy_data$genes))
+          } else {
+            valid_genes <- intersect(toupper(gene_groups[[i]]), toupper(values$lazy_data$genes))
+          }
+          
+          if (length(valid_genes) > 0) {
+            expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = "X")
+            if (!is.null(expr_mat)) {
+              rowMeans(expr_mat, na.rm = TRUE)
+            } else {
+              rep(0, n_cells_default)
+            }
+          } else {
+            rep(0, n_cells_default)
+          }
+        })
+      }
+      colnames(mat) <- gene_group_names
+      
+      incProgress(0.5)
+      process_heatmap_data(mat, input$heatmap_score_panel2, input$heatmap_cell_group_mode_panel2, input$heatmap_cluster_by_panel2)
+    })
+  }, ignoreNULL = FALSE, ignoreInit = FALSE)
+
+  # Helper function to process heatmap data
+  process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by) {
+    # Fill missing values
+    mat[is.na(mat)] <- 0
+
+    # Scale or log
+    if (score_type == "z_score") {
+      mat <- scale(mat)
+      mat[is.na(mat)] <- 0
+    }
+
+    group_info <- NULL
+    # Cell grouping logic
+    if (cell_group_mode == "categorical") {
+      req(cluster_by)
+      group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
+      req(length(group_var) == nrow(mat))
+      
+      group_levels <- sort(unique(group_var))
+      group_var <- factor(group_var, levels = group_levels)
+      
+      mat <- sapply(colnames(mat), function(g) tapply(mat[, g], group_var, mean, na.rm = TRUE))
+      mat <- t(mat)
+    } else if (cell_group_mode == "none") {
+      req(cluster_by)
+      group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
+      req(length(group_var) == nrow(mat))
+      
+      group_levels <- sort(unique(group_var))
+      group_var <- factor(group_var, levels = group_levels)
+      o <- order(group_var)
+      
+      mat <- t(mat[o, , drop = FALSE])
+      group_info <- group_var[o]
+    }
+
+    list(mat = mat, group_info = group_info)
+  }
+
+  # Render Panel 1 heatmap
+  heatmapPlot1_obj <- reactive({
+    req(heatmap_data_panel1())
+    library(ComplexHeatmap)
+    data <- heatmap_data_panel1()
+    p <- render_heatmap(data, "Panel 1: Individual Genes")
+    plot_storage$heatmap1 <- p
+    p
+  })
+  output$heatmapPlot1 <- renderPlot({
+    req(heatmapPlot1_obj())
+    heatmapPlot1_obj()
+  })
+
+
+  # Render Panel 2 heatmap
+  output$heatmapPlot2 <- renderPlot({
+    req(heatmap_data_panel2())
+    library(ComplexHeatmap)
+    data <- heatmap_data_panel2()
+    p <- render_heatmap(data, "Panel 2: Gene Sets")
+    plot_storage$heatmap2 <- p
+    p
+  })
+
+  # Helper function to render heatmap
+  render_heatmap <- function(data, title) {
+    mat <- data$mat
+    
+    if (!is.null(data$group_info)) {
+      groups <- levels(data$group_info)
+      library(RColorBrewer)
+
+      # Base palette (Set1 has up to 9 distinct colors)
+      max_colors <- 9
+      base_pal <- brewer.pal(max_colors, "Set1")
+
+      # Suppose groups is your vector of category names
+      n <- length(groups)
+
+      # If more than 9 groups, extend colors using colorRampPalette
+      pal_colors <- if (n <= max_colors) {
+        base_pal[1:n]
+      } else {
+        colorRampPalette(base_pal)(n)
+      }
+
+      pal <- setNames(pal_colors, groups)
+
+      ha <- HeatmapAnnotation(
+        Group = data$group_info,
+        col = list(Group = pal),
+        show_annotation_name = FALSE
+      )
+
+      Heatmap(
+        mat,
+        name = "expression",
+        top_annotation = ha,
+        cluster_columns = FALSE,
+        cluster_rows = TRUE,
+        show_column_names = FALSE,
+        column_title = title,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        raster_quality = 3,
+        column_split = data$group_info,
+        row_names_max_width = unit(8, "cm"),
+        row_names_gp = gpar(fontsize = 10)
+      )
+    } else {
+      Heatmap(
+        mat,
+        name = "expression",
+        cluster_rows = TRUE,
+        cluster_columns = TRUE,
+        column_title = title,
+        use_raster = TRUE,
+        raster_device = "CairoPNG",
+        raster_quality = 3,
+        row_names_max_width = unit(8, "cm"),
+        row_names_gp = gpar(fontsize = 10)
+      )
+    }
+  }
 
 
   # Gene Tab
@@ -1912,28 +2532,78 @@ server <- function(input, output, session) {
   #   }
   # })
 
-  # UI: Gene search
+  # UI: Gene search for violin_plot_genes tab
   output$gene_selected_ui <- renderUI({
+    message("Rendering gene_selected_ui") # Debug
     if (is.null(values$lazy_data)) {
-      shinyWidgets::virtualSelectInput(
-        "geneSearch_tab", "🔍 Search Gene:",
-        choices = "Initialize dataset first...",
-        multiple = TRUE,
-        search = TRUE,
-        searchPlaceholderText = "Type gene names ...",
-        maxValues = 15
+      selectizeInput("geneSearch_tab", "🔍 Search Gene:",
+                    choices = list("Initialize dataset first..." = "loading"),
+                    multiple = TRUE
       )
     } else {
-      shinyWidgets::virtualSelectInput(
-        "geneSearch_tab", "🔍 Search Gene:",
-        choices = values$lazy_data$genes,
-        multiple = TRUE,
-        search = TRUE,
-        searchPlaceholderText = "Type gene names ...",
-        maxValues = 15
+      selectizeInput("geneSearch_tab", "🔍 Search Gene:",
+                    choices = NULL, # Rely on server-side updates
+                    multiple = TRUE,
+                    options = list(
+                      placeholder = "Type gene names ...",
+                      openOnFocus = FALSE,
+                      closeAfterSelect = TRUE,
+                      plugins = list("remove_button"),
+                      maxItems = 15,
+                      onInitialize = I("function() { console.log('geneSearch_tab initialized'); Shiny.setInputValue('geneSearch_tab_initialized', true, {priority: 'event'}); }") # Trigger update
+                    )
       )
     }
   })
+
+  # Store selections in reactive values
+  values$geneSearch_selection <- NULL
+  values$geneSearch_tab_selection <- NULL
+
+  # Update stored selections when user changes them
+  observe({
+    values$geneSearch_selection <- input$geneSearch
+  }) %>% bindEvent(input$geneSearch, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  observe({
+    values$geneSearch_tab_selection <- input$geneSearch_tab
+  }) %>% bindEvent(input$geneSearch_tab, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  # Reset gene selections when dataset changes
+  observe({
+    message("Dataset changed, resetting gene selections") # Debug
+    values$geneSearch_selection <- NULL
+    values$geneSearch_tab_selection <- NULL
+  }) %>% bindEvent(input$dataset, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  # Update gene choices when data is loaded, resetting selections
+  observe({
+    req(values$lazy_data) # Ensure dataset is loaded
+    message("Updating selectizeInputs for geneSearch. Gene list length: ", length(values$lazy_data$genes)) # Debug
+
+    updateSelectizeInput(
+      session,
+      "geneSearch",
+      choices = values$lazy_data$genes,
+      selected = NULL, # Reset selections
+      server = TRUE
+    )
+  }) %>% bindEvent(values$lazy_data, ignoreNULL = TRUE, ignoreInit = FALSE)
+
+  # Update gene choices for geneSearch_tab when data is loaded or tab is initialized
+  observe({
+    req(values$lazy_data, input$geneSearch_tab_initialized) # Trigger when geneSearch_tab is initialized or data changes
+    message("Updating selectizeInputs for geneSearch_tab. Gene list length: ", length(values$lazy_data$genes)) # Debug
+
+    updateSelectizeInput(
+      session,
+      "geneSearch_tab",
+      choices = values$lazy_data$genes,
+      selected = NULL, # Reset selections
+      server = TRUE
+    )
+  }) %>% bindEvent(list(values$lazy_data, input$geneSearch_tab_initialized), ignoreNULL = TRUE, ignoreInit = FALSE)
+
 
   # Group by
   output$gene_group_by_ui <- renderUI({
@@ -1999,7 +2669,9 @@ server <- function(input, output, session) {
                         "Gene Expression (Violin Plot)", 
                         "Gene Expression (Box Plot)")
     p <- p + labs(title = title_text)
-    
+
+    plot_storage$gene_main <- p
+
     p
   })
 
@@ -2097,6 +2769,8 @@ server <- function(input, output, session) {
           y = input$qc_metric
         )
     }
+
+    plot_storage$qc_main <- p
     
     p
   })
@@ -2202,6 +2876,153 @@ server <- function(input, output, session) {
       rownames = FALSE
     )
   })
+
+  # Reactive value to track canvas data readiness
+  canvas_data_ready <- reactiveVal(FALSE)
+  
+  # Observe canvas data sent from JavaScript
+  observeEvent(input$canvas_data, {
+    print("Received canvas_data from JavaScript")
+    print(str(input$canvas_data)) # Debug: Inspect structure
+    plot_storage$canvases <- input$canvas_data
+    print("Updated plot_storage$canvases")
+    print(str(plot_storage$canvases)) # Debug: Confirm update
+    canvas_data_ready(TRUE) # Signal that canvas data is ready
+  })
+  
+  # Manual test button for canvas capture
+  observeEvent(input$test_capture, {
+    print("Manually triggering canvas capture...")
+    session$sendCustomMessage("captureCanvases", list(debug = "manual_trigger"))
+  })
+  
+  output$download_report <- downloadHandler(
+    filename = function() {
+      paste("analysis_report_", Sys.Date(), ".html", sep = "")
+    },
+    content = function(file) {
+      withProgress(message = 'Generating Report...', {
+        # Check if canvas data is available
+        if (!canvas_data_ready()) {
+          print("Warning: No canvas data available. Attempting to capture now...")
+          session$sendCustomMessage("captureCanvases", list(debug = "download_trigger"))
+          
+          # Wait briefly for canvas data
+          max_attempts <- 20 # 10 seconds
+          attempt <- 1
+          start_time <- Sys.time()
+          while (!canvas_data_ready() && attempt <= max_attempts) {
+            print(paste("Attempt", attempt, ": Waiting for canvas data..."))
+            Sys.sleep(0.5)
+            attempt <- attempt + 1
+          }
+          
+          elapsed_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+          if (!canvas_data_ready()) {
+            print(paste("Timeout: No canvas data received after", round(elapsed_time, 2), "seconds."))
+          } else {
+            print(paste("Canvas data received after", round(elapsed_time, 2), "seconds."))
+          }
+        } else {
+          print("Using pre-captured canvas data.")
+        }
+        
+        # Create temporary directory for plots
+        temp_dir <- file.path(getwd(), "tmp")
+        plot_dir <- file.path(temp_dir, "plots")
+        dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+        
+        # Save static plots as image files
+        saved_plots <- list()
+        
+        # Save heatmap1 if it exists
+        if (!is.null(plot_storage$heatmap1)) {
+          hm1_file <- file.path(plot_dir, "heatmap1.png")
+          png(hm1_file, width = 10, height = 6, units = "in", res = 300)
+          draw(plot_storage$heatmap1) # Use draw() for ComplexHeatmap objects
+          dev.off()
+          saved_plots$heatmap1 <- hm1_file
+        }
+
+        # Save heatmap2 if it exists
+        if (!is.null(plot_storage$heatmap2)) {
+          hm2_file <- file.path(plot_dir, "heatmap2.png")
+          png(hm2_file, width = 10, height = 6, units = "in", res = 300)
+          draw(plot_storage$heatmap2) # Use draw() for ComplexHeatmap objects
+          dev.off()
+          saved_plots$heatmap2 <- hm2_file
+        }
+
+        # Save gene_main if it exists (assuming it's a ggplot object)
+        if (!is.null(plot_storage$gene_main)) {
+          gene_file <- file.path(plot_dir, "gene_main.png")
+          ggsave(gene_file, plot_storage$gene_main, width = 10, height = 6, dpi = 300)
+          saved_plots$gene_main <- gene_file
+        }
+
+        # Save qc_main if it exists (assuming it's a ggplot object)
+        if (!is.null(plot_storage$qc_main)) {
+          qc_file <- file.path(plot_dir, "qc_main.png")
+          ggsave(qc_file, plot_storage$qc_main, width = 10, height = 6, dpi = 300)
+          saved_plots$qc_main <- qc_file
+        }
+        
+        # Save canvas images
+        if (length(plot_storage$canvases) > 0) {
+          print(paste("Saving", length(plot_storage$canvases), "canvas images..."))
+          for (canvas_id in names(plot_storage$canvases)) {
+            print(paste("Processing canvas:", canvas_id))
+            data_url <- plot_storage$canvases[[canvas_id]]
+            img_data <- sub("^data:image/(png|jpeg);base64,", "", data_url)
+            img_file <- file.path(plot_dir, paste0(canvas_id, ".jpg"))
+            writeBin(base64enc::base64decode(img_data), img_file)
+            saved_plots[[canvas_id]] <- img_file
+            print(paste("Saved canvas image:", img_file))
+          }
+        } else {
+          print("No canvas images to save.")
+        }
+        
+        # Reset canvas_data_ready for the next download
+        canvas_data_ready(FALSE)
+        
+        # Copy the R Markdown template
+        tempReport <- file.path(temp_dir, "report_template.Rmd")
+        file.copy("report_template.Rmd", tempReport, overwrite = TRUE)
+        
+        # Prepare parameters
+        params <- list(
+          app_data = list(
+            saved_plots = saved_plots,
+            canvas_info = plot_storage$canvases,
+            timestamp = Sys.time(),
+            user_inputs = reactiveValuesToList(input),
+            plot_dir = plot_dir
+          )
+        )
+        
+        # Render the document
+        print("Starting R Markdown rendering...")
+        start_time <- Sys.time()
+        rmarkdown::render(
+          input = tempReport,
+          output_file = file,
+          params = params,
+          envir = new.env(parent = globalenv())
+        )
+        render_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+        print(paste("Report rendering complete in", round(render_time, 2), "seconds."))
+      })
+    }
+  )
+
+  plot_storage <- reactiveValues(
+    heatmap1 = NULL,
+    heatmap2 = NULL,
+    gene_main = NULL,
+    qc_main = NULL,
+    canvases = list()
+  )
 
 }
 

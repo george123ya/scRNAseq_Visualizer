@@ -151,8 +151,43 @@ body {
     background: #f8f9fa !important;
 }
 
+.plot-legend:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.legend-drag-handle:hover {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.legend-resize-handle:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.plot-legend .legend-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+/* Custom scrollbar for legend items */
+.plot-legend div:nth-child(2)::-webkit-scrollbar {
+  width: 8px;
+}
+
+.plot-legend div:nth-child(2)::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+.plot-legend div:nth-child(2)::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+.plot-legend div:nth-child(2)::-webkit-scrollbar-thumb:hover {
+  background: #a1a1a1;
+}
+
 /* Plot Container */
-    .plot-container {
+.plot-container {
     position: relative;
     background: white;
     border-radius: 12px;
@@ -326,3 +361,5 @@ body {
     border-width: 0 2px 2px 0;
     transform: rotate(45deg);
 }
+
+

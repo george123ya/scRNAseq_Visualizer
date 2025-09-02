@@ -128,7 +128,11 @@ ui <- fluidPage(
           uiOutput("datasetUI"),
           tags$small(class = "text-muted", 
             "Select your .h5ad file or use demo data for exploration")
-        )
+        ),
+        actionButton("test_capture", "Prepare Download"),
+        downloadButton("download_report", "Download Full Report")
+        # uiOutput("download_button_ui")
+
       ),
       
       # Status and Data Info - Collapsible
@@ -184,13 +188,14 @@ ui <- fluidPage(
 
       # Gene Expression Tab Controls
       conditionalPanel(
-        condition = "input.main_tabs == 'gene_expression'",
+        condition = "input.main_tabs == 'violin_plot_genes'",
         div(class = "collapsible-section",
           div(class = "collapsible-header", onclick = "toggleCollapse('gene-params-section')",
             span(class = "section-header", "🔍 Gene Plot Parameters"),
             span(class = "collapse-icon", "▼")
           ),
           div(id = "gene-params-section", class = "collapsible-content",
+            
             conditionalPanel(
               condition = "input.qc_plot_type != 'scatter'",
               uiOutput("gene_selected_ui"),
@@ -218,48 +223,161 @@ ui <- fluidPage(
       # Heatmap
 
       conditionalPanel(
-        condition = "input.main_tabs == 'gene_expression'",
-        # Gene Search and Visualization - Collapsible
+        condition = "input.main_tabs == 'heatmap_genes'",
+
+        # --- PANEL 1: INDIVIDUAL GENES ---
         div(class = "collapsible-section",
           div(
             class = "collapsible-header",
-            onclick = "toggleCollapse('heatmap-section')",
-            span(class = "section-header", "Heatmap"),
+            onclick = "toggleCollapse('heatmap-panel1')",
+            span(class = "section-header", "Panel 1: Individual Genes"),
             span(class = "collapse-icon", "▼")
           ),
           div(
-            id = "heatmap-section",
+            id = "heatmap-panel1", 
             class = "collapsible-content",
-            
-            # Gene selection input
+
             textInput(
-              "heatmap_genes", 
-              label = "Genes to visualize:", 
-              placeholder = "Enter comma-separated gene names (e.g. KRT10, BRCA2)"
+              "heatmap_genes_panel1",
+              label = "Genes to visualize (comma-separated):",
+              placeholder = "e.g., KRT10, BRCA2"
             ),
-            
-            # Clustering selection (dynamic)
-            uiOutput("heatmap_cluster_by_ui"),
-            
-            # Scale selection
+
+            # Cell grouping settings (shared between panels)
+            h5("Cell Grouping Settings"),
             radioButtons(
-              "heatmap_score", 
-              label = "Scale values by:", 
-              choices = c("Z-score" = "z_score", "Log" = "log"),
+              "heatmap_cell_group_mode_panel1",
+              label = "Group cells by:",
+              choices = c(
+                "Categorical variable (cluster cells, show means)" = "categorical",
+                "None (show all cells, color by group)" = "none"
+              ),
+              selected = "categorical"
+            ),
+            uiOutput("heatmap_cluster_by_ui_panel1"),
+
+            radioButtons(
+              "heatmap_score_panel1",
+              label = "Scale values by:",
+              choices = c("Z-score" = "z_score", "No scale (X layer)" = "log"),
               selected = "z_score",
               inline = TRUE
             ),
-            
-            # Update button
+
             actionButton(
-              "update_heatmap", 
-              "Update Heatmap", 
+              "update_heatmap_panel1",
+              "Update Panel 1",
               class = "btn btn-primary btn-sm",
-              style = "margin-top: 8px;"
+              style = "margin-top: 8px; width: 100%;"
+            )
+          )
+        ),
+
+        # --- PANEL 2: GENE SETS ---
+        div(class = "collapsible-section",
+          div(
+            class = "collapsible-header",
+            onclick = "toggleCollapse('heatmap-panel2')",
+            span(class = "section-header", "Panel 2: Gene Sets / Pathways"),
+            span(class = "collapse-icon", "▼")
+          ),
+          div(
+            id = "heatmap-panel2", 
+            class = "collapsible-content",
+
+            radioButtons(
+              "heatmap_gene_group_mode_panel2",
+              label = "Gene set source:",
+              choices = c(
+                "Custom gene sets (from .gmt)" = "custom_gmt",
+                "Manual gene sets" = "manual"
+              ),
+              selected = "custom_gmt"
+            ),
+
+            # Pathway selector
+            conditionalPanel(
+              condition = "input.heatmap_gene_group_mode_panel2 == 'pathways'",
+              uiOutput("heatmap_pathway_select_panel2")
+            ),
+
+            # File upload for .gmt file
+            conditionalPanel(
+              condition = "input.heatmap_gene_group_mode_panel2 == 'custom_gmt'",
+              fileInput(
+                "gmt_file_panel2",
+                label = "Upload .gmt file:",
+                accept = c(".gmt"),
+                placeholder = "Select a .gmt file"
+              ),
+              conditionalPanel(
+                condition = "output.gmt_loaded_panel2",
+                uiOutput("heatmap_gmt_select_panel2")
+              )
+            ),
+
+            # Manual gene set builder
+            conditionalPanel(
+              condition = "input.heatmap_gene_group_mode_panel2 == 'manual'",
+              h5("Build Custom Gene Sets"),
+              wellPanel(
+                fluidRow(
+                  column(4,
+                    textInput("manual_geneset_name", "Gene Set Name:", placeholder = "e.g., My_Genes")
+                  ),
+                  column(6,
+                    textInput("manual_geneset_genes", "Genes (comma-separated):", placeholder = "e.g., GENE1, GENE2, GENE3")
+                  ),
+                  column(2,
+                    br(),
+                    actionButton("add_manual_geneset", "Add", class = "btn btn-success btn-sm")
+                  )
+                )
+              ),
+              uiOutput("manual_genesets_display"),
+              conditionalPanel(
+                condition = "output.has_manual_genesets",
+                selectizeInput(
+                  "selected_manual_genesets",
+                  "Select gene sets to plot:",
+                  choices = NULL,
+                  multiple = TRUE,
+                  options = list(placeholder = "Select gene sets...")
+                )
+              )
+            ),
+
+            # Cell grouping settings (shared between panels)
+            h5("Cell Grouping Settings"),
+            radioButtons(
+              "heatmap_cell_group_mode_panel2",
+              label = "Group cells by:",
+              choices = c(
+                "Categorical variable (cluster cells, show means)" = "categorical",
+                "None (show all cells, color by group)" = "none"
+              ),
+              selected = "categorical"
+            ),
+            uiOutput("heatmap_cluster_by_ui_panel2"),
+
+            radioButtons(
+              "heatmap_score_panel2",
+              label = "Scale values by:",
+              choices = c("Z-score" = "z_score", "No scale (X layer)" = "log"),
+              selected = "z_score",
+              inline = TRUE
+            ),
+
+            actionButton(
+              "update_heatmap_panel2",
+              "Update Panel 2",
+              class = "btn btn-primary btn-sm",
+              style = "margin-top: 8px; width: 100%;"
             )
           )
         )
       ),
+
       
       # QC Tab Controls
       conditionalPanel(
@@ -409,21 +527,37 @@ ui <- fluidPage(
         ),
 
         # Gene Expression Tab
-        tabPanel("📊 Gene Expression", value = "gene_expression",
+        tabPanel("🎻 Violin Plot", value = "violin_plot_genes",
           div(style = "margin-top: 20px;",
-            h3("📈 Gene Expression Overview"),
-            p("Visualize and compare gene expression levels across different cell groups using interactive plots."),
+            h3("📈 Gene Expression"),
             fluidRow(
               # Main plots
               column(8,
                 div(class = "gene-plots",
                   h4("Expression Distribution"),
                   plotOutput("gene_main_plot", height = "400px"),
-                  tags$hr(),
-                  h4("Expression Heatmap"),
-                  plotOutput("heatmapPlot", height = "400px")
                 )
               )
+            )
+          )
+        ),
+        tabPanel("🗺️ Heatmap", value = "heatmap_genes",
+          div(style = "margin-top: 20px;",
+            h3("📈 Gene Expression Heatmaps"),
+
+            # First heatmap
+            div(class = "gene-plots",
+              h4("Panel 1: Genes Heatmap"),
+              plotOutput("heatmapPlot1", height = "400px")
+            ),
+
+            # Add some spacing between panels
+            br(), br(),
+
+            # Second heatmap
+            div(class = "gene-plots",
+              h4("Panel 2: Pathways/Gene Sets Heatmap"),
+              plotOutput("heatmapPlot2", height = "400px")
             )
           )
         ),

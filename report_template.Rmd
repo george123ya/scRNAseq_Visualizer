@@ -1,0 +1,145 @@
+---
+title: "Comprehensive Analysis Report"
+author: "Generated from Shiny Application"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+    fig_width: 10
+    fig_height: 6
+params:
+  app_data: NA
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, 
+                     fig.align = 'center', out.width = '100%')
+library(knitr)
+library(DT)
+
+# Access parameters
+saved_plots <- params$app_data$saved_plots
+canvas_info <- params$app_data$canvas_info
+user_inputs <- params$app_data$user_inputs
+timestamp <- params$app_data$timestamp
+```
+
+# Analysis Report
+
+**Generated on:** `r timestamp`
+
+## Executive Summary
+
+This comprehensive report contains all visualizations and analysis results generated from the Shiny application, capturing the current state of your analysis including heatmaps, gene analysis plots, quality control visualizations, and static images of interactive canvas elements.
+
+
+## Visualization Results
+
+### Heatmap Analysis
+
+```{r heatmap-section, results='asis'}
+heatmap_count <- sum(c(!is.null(saved_plots$heatmap1), !is.null(saved_plots$heatmap2)))
+
+if(heatmap_count > 0) {
+  cat("The following heatmap visualizations were generated:\n\n")
+} else {
+  cat("No heatmap visualizations were generated in this session.\n\n")
+}
+```
+
+```{r heatmap1, eval=!is.null(saved_plots$heatmap1)}
+cat("#### Heatmap 1\n\n")
+include_graphics(normalizePath(saved_plots$heatmap1))
+```
+
+```{r heatmap2, eval=!is.null(saved_plots$heatmap2)}
+cat("#### Heatmap 2\n\n")
+include_graphics(normalizePath(saved_plots$heatmap2))
+```
+
+### Gene Expression Analysis
+
+```{r gene-analysis, eval=!is.null(saved_plots$gene_main)}
+cat("#### Main Gene Analysis Plot\n\n")
+include_graphics(normalizePath(saved_plots$gene_main))
+cat("\n\nThis plot shows the main gene expression analysis results.\n")
+```
+
+```{r no-gene-analysis, eval=is.null(saved_plots$gene_main), results='asis'}
+cat("No main gene analysis plot was generated in this session.\n")
+```
+
+### Quality Control
+
+```{r qc-analysis, eval=!is.null(saved_plots$qc_main)}
+cat("#### Quality Control Plot\n\n")
+include_graphics(normalizePath(saved_plots$qc_main))
+cat("\n\nThis plot displays the quality control metrics for the analysis.\n")
+```
+
+```{r no-qc-analysis, eval=is.null(saved_plots$qc_main), results='asis'}
+cat("No quality control plot was generated in this session.\n")
+```
+
+## Interactive Canvas Elements
+
+### Scatterplot Canvas
+
+```{r scatterplot-info, eval=!is.null(saved_plots$scatterplot_canvas), results='asis'}
+cat("#### Scatterplot Canvas\n\n")
+include_graphics(normalizePath(saved_plots$scatterplot_canvas))
+cat("\n\nThis image represents a static snapshot of the interactive scatterplot canvas generated in the application.\n")
+```
+
+```{r no-scatterplot, eval=is.null(saved_plots$scatterplot_canvas), results='asis'}
+cat("No scatterplot canvas was generated in this session.\n\n")
+```
+
+### Gene-Specific Canvas Plots
+
+```{r gene-canvas-info, results='asis'}
+# Filter for gene canvas plots
+gene_canvases <- saved_plots[grepl("^gene_canvas_", names(saved_plots))]
+
+if(length(gene_canvases) > 0) {
+  cat("#### Gene-Specific Canvas Plots\n\n")
+  cat("The following static images represent snapshots of the interactive gene-specific canvas plots generated in the application:\n\n")
+  
+  for(canvas_name in names(gene_canvases)) {
+    gene_name <- gsub("gene_canvas_", "", canvas_name)
+    cat(sprintf("##### %s\n\n", gene_name))
+    cat(sprintf("![](%s)\n\n", normalizePath(gene_canvases[[canvas_name]])))
+    cat(sprintf("This image represents a static snapshot of the interactive canvas for gene %s.\n\n", gene_name))
+  }
+} else {
+  cat("No gene-specific canvas plots were generated in this session.\n\n")
+}
+```
+
+## Data Processing Summary
+
+```{r processing-summary, results='asis'}
+total_plots <- length(saved_plots)
+total_canvases <- length(saved_plots[grepl("^scatterplot_canvas|^gene_canvas_", names(saved_plots))])
+
+cat("### Analysis Summary\n\n")
+cat("- **Static plots generated (including canvas snapshots):** ", total_plots, "\n")
+cat("- **Interactive canvases captured:** ", total_canvases, "\n")
+cat("- **Report generation time:** ", format(timestamp, "%Y-%m-%d %H:%M:%S"), "\n\n")
+```
+
+## Technical Information
+
+```{r tech-info}
+cat("### Session Information\n\n")
+cat("R version:", R.version.string, "\n")
+cat("Platform:", R.version$platform, "\n")
+cat("Report generated using: rmarkdown and knitr\n")
+```
+
+---
+
+*This report was automatically generated from your Shiny application. For interactive features and real-time updates, please return to the application interface.*

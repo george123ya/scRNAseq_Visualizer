@@ -218,7 +218,89 @@ function createPlotTitle(canvas, title) {
 
 let lastClicked = null;
 
+// Add these global variables at the top of your file
+let isUpdatingVisibility = false;
+let currentLegendData = new Map(); // Track current legend data to avoid unnecessary recreations
+
+// Add these helper functions first (if not already added)
+let customColors = new Map(); // Add to globals if not already there
+
+function rgbToHex(rgb) {
+  if (rgb.startsWith('#')) return rgb;
+  const result = rgb.match(/\d+/g);
+  if (!result || result.length < 3) return rgb;
+  const r = parseInt(result[0]);
+  const g = parseInt(result[1]);
+  const b = parseInt(result[2]);
+  return '#' + [r, g, b].map(x => {
+    const hex = x.toString(16);
+    return hex.length === 1 ? '0' + hex : hex;
+  }).join('');
+}
+
+function createInlineColorPicker(initialColor, onColorChange, onClose) {
+  const picker = document.createElement('input');
+  picker.type = 'color';
+  picker.value = initialColor;
+  picker.style.cssText = `
+    width: 100%;
+    height: 100%;
+    border: none;
+    border-radius: 2px;
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+  `;
+  
+  // Live updates as user drags
+  picker.addEventListener('input', (e) => {
+    onColorChange(e.target.value, false); // false = not final
+  });
+  
+  // Final update when user is done
+  picker.addEventListener('change', (e) => {
+    onColorChange(e.target.value, true); // true = final
+  });
+  
+  // Close on blur or escape
+  picker.addEventListener('blur', () => {
+    onClose();
+  });
+  
+  picker.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      onClose();
+    }
+  });
+  
+  return picker;
+}
+
 function createPlotLegend(plotId, legendData, type = 'categorical') {
+  const legendKey = `${plotId}_${type}`;
+  const existingData = currentLegendData.get(legendKey);
+  
+  if (isUpdatingVisibility && type === 'categorical' && existingData) {
+    const container = document.getElementById(plotId === 'main' ? 'scatterplot_canvas' : `gene_canvas_${plotId}`);
+    if (!container) return;
+    
+    const plotContainer = container.parentElement;
+    if (!plotContainer) return;
+    
+    const legend = plotContainer.querySelector('.plot-legend');
+    if (legend) {
+      const itemsContainer = legend.children[1];
+      if (itemsContainer && itemsContainer.classList) {
+        itemsContainer.querySelectorAll('.legend-item').forEach((el, idx) => {
+          el.style.opacity = legendData.visible.has(idx) ? '1' : '0.4';
+        });
+        return;
+      }
+    }
+  }
+
+  currentLegendData.set(legendKey, legendData);
+
   const container = document.getElementById(plotId === 'main' ? 'scatterplot_canvas' : `gene_canvas_${plotId}`);
   if (!container) return;
 
@@ -229,34 +311,40 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
   const existingLegend = plotContainer.querySelector('.plot-legend');
   if (existingLegend) existingLegend.remove();
 
-  // Ensure plotContainer is relative for absolute legend placement
   plotContainer.style.position = 'relative';
 
-  // Create overlay legend
+  // Create draggable legend container
   const legendContainer = document.createElement('div');
   legendContainer.className = 'plot-legend';
+  const legendId = `legend_${plotId}_${type}`;
+  
   legendContainer.style.cssText = `
     position: absolute;
     top: 8px;
-    right: 8px; /* Change to 'left: 8px;' for top-left placement */
+    right: 8px;
     width: 150px;
-    background: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.95);
     border: 1px solid #ddd;
     font-size: 11px;
-    padding: 6px;
-    z-index: 10; /* ensure it floats above plot */
+    padding: 0;
+    z-index: 10;
     border-radius: 4px;
-    pointer-events: auto; /* allow interaction */
+    pointer-events: auto;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    min-width: 120px;
+    min-height: 100px;
   `;
 
   if (type === 'gene') {
     const { minVal, maxVal, midVal, realMin, realMax, geneName } = legendData;
-    legendContainer.innerHTML = `
-      <div style="font-weight: bold; margin-bottom: 6px; text-align: center;">
+    
+    const contentContainer = document.createElement('div');
+    contentContainer.style.cssText = 'padding: 6px;';
+    contentContainer.innerHTML = `
+      <div style="font-weight: bold; margin-bottom: 6px; text-align: center; margin-top: 4px;">
         ${geneName}
       </div>
       <div style="display: flex; justify-content: center; align-items: center;">
-        <!-- Colorbar -->
         <div style="
           width: 20px; height: 80px;
           background: linear-gradient(to top, 
@@ -267,7 +355,6 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
           border: 1px solid #ccc;
           margin-right: 6px;">
         </div>
-        <!-- Tick labels -->
         <div style="
           display: flex;
           flex-direction: column;
@@ -289,14 +376,17 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         Data range: ${realMin} – ${realMax}
       </div>
     `;
-  }
- else {
+    
+    legendContainer.appendChild(contentContainer);
+    
+  } else {
     const { names, colors, visible, annotationName } = legendData;
 
+    // Title
     const titleDiv = document.createElement('div');
     titleDiv.style.cssText = `
       font-weight: bold;
-      margin-bottom: 6px;
+      margin: 6px 6px 6px 6px;
       text-align: center;
       border-bottom: 1px solid #eee;
       padding-bottom: 4px;
@@ -304,10 +394,12 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
     titleDiv.textContent = annotationName.replace(/_/g, ' ');
     legendContainer.appendChild(titleDiv);
 
+    // Scrollable items container
     const itemsContainer = document.createElement('div');
     itemsContainer.style.cssText = `
       max-height: 150px;
       overflow-y: auto;
+      margin: 0 6px 6px 6px;
     `;
 
     names.forEach((name, i) => {
@@ -317,58 +409,163 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         display: flex;
         align-items: center;
         padding: 3px;
-        cursor: pointer;
         border-radius: 3px;
-        user-select: none; /* prevent browser text selection on shift-click */
+        user-select: none;
         opacity: ${visible.has(i) ? '1' : '0.4'};
         transition: opacity 0.2s;
       `;
 
-      item.innerHTML = `
-        <div style="
-          flex: 0 0 12px;
-          height: 12px;
-          background: ${colors[i]};
-          margin-right: 6px;
-          border-radius: 2px;">
-        </div>
-        <span style="
-          font-size: 10px;
-          color: #333;
-          flex: 1;
-          word-break: break-word;
-          overflow-wrap: anywhere;
-          white-space: normal;
-        ">${name}</span>
+      // Create color box container
+      const colorBoxContainer = document.createElement('div');
+      colorBoxContainer.style.cssText = `
+        flex: 0 0 12px;
+        height: 12px;
+        margin-right: 6px;
+        position: relative;
+        border-radius: 2px;
+        overflow: hidden;
       `;
 
-      item.addEventListener('click', (e) => {
-        // Store scroll position before making changes
-        const scrollContainer = itemsContainer;
-        const scrollTop = scrollContainer.scrollTop;
+      // Create the actual color display
+      const colorBox = document.createElement('div');
+      const customColor = customColors.get(`${annotationName}_${i}`) || colors[i];
+      colorBox.style.cssText = `
+        width: 100%;
+        height: 100%;
+        background: ${customColor};
+        border-radius: 2px;
+        cursor: pointer;
+        border: 1px solid rgba(0,0,0,0.2);
+        transition: transform 0.2s;
+        box-sizing: border-box;
+      `;
+
+      // Add hover effects to color box
+      colorBox.addEventListener('mouseenter', () => {
+        if (!colorBox.dataset.editing) {
+          colorBox.style.transform = 'scale(1.1)';
+          colorBox.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
+        }
+      });
+
+      colorBox.addEventListener('mouseleave', () => {
+        if (!colorBox.dataset.editing) {
+          colorBox.style.transform = 'scale(1)';
+          colorBox.style.boxShadow = 'none';
+        }
+      });
+
+      let originalColor = customColor; // Store original for potential cancellation
+
+      // Add color picker click handler to color box
+      colorBox.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         
+        if (colorBox.dataset.editing === 'true') return; // Already editing
+        
+        colorBox.dataset.editing = 'true';
+        originalColor = rgbToHex(colorBox.style.backgroundColor || customColor);
+        
+        // Create inline color picker
+        const colorPicker = createInlineColorPicker(
+          originalColor,
+          (newColor, isFinal) => {
+            // Update visual immediately (live updates)
+            colorBox.style.backgroundColor = newColor;
+            
+            if (isFinal) {
+              // Store custom color permanently
+              customColors.set(`${annotationName}_${i}`, newColor);
+              
+              // Update annotation colors array
+              if (mainAnnotation && mainAnnotation.colors) {
+                mainAnnotation.colors[i] = newColor;
+              }
+              
+              // Send to Shiny backend
+              Shiny.setInputValue('colorChange', {
+                annotation: annotationName,
+                categoryIndex: i,
+                categoryName: name,
+                newColor: newColor,
+                allColors: mainAnnotation ? mainAnnotation.colors : colors,
+                timestamp: Date.now()
+              }, { priority: 'event' });
+            } else {
+              // Live update - just update visuals, don't persist yet
+              // Update annotation colors for live preview
+              if (mainAnnotation && mainAnnotation.colors) {
+                mainAnnotation.colors[i] = newColor;
+              }
+            }
+            
+            // Redraw plots with new color (both live and final)
+            if (scatterplot && mainAnnotation && mainAnnotation.colorBy === annotationName) {
+              scatterplot.set({ pointColor: mainAnnotation.colors });
+              scatterplot.draw(filteredPoints, { transition: false });
+            }
+          },
+          () => {
+            // On close/cancel
+            colorBox.dataset.editing = 'false';
+            colorBoxContainer.innerHTML = '';
+            colorBoxContainer.appendChild(colorBox);
+            
+            // Reset styles
+            colorBox.style.transform = 'scale(1)';
+            colorBox.style.boxShadow = 'none';
+          }
+        );
+        
+        // Replace color box with picker temporarily
+        colorBoxContainer.innerHTML = '';
+        colorBoxContainer.appendChild(colorPicker);
+        
+        // Focus the picker and open it
+        setTimeout(() => {
+          colorPicker.focus();
+          colorPicker.click(); // This opens the color picker dialog
+        }, 10);
+      });
+
+      // Create text span for visibility toggle
+      const textSpan = document.createElement('span');
+      textSpan.style.cssText = `
+        font-size: 10px;
+        color: #333;
+        flex: 1;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        white-space: normal;
+        cursor: pointer;
+      `;
+      textSpan.textContent = name;
+
+      // Add your existing visibility toggle click handler to text span
+      textSpan.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const scrollTop = itemsContainer.scrollTop;
         const currentlyVisible = Array.from(visible);
+        isUpdatingVisibility = true;
 
         if (e.shiftKey && lastClicked !== null) {
-          // --- Shift click: select contiguous range ---
           const start = Math.min(lastClicked, i);
           const end = Math.max(lastClicked, i);
 
           if (e.ctrlKey || e.metaKey) {
-            // Shift + Ctrl → ADD contiguous range to existing selection
             for (let idx = start; idx <= end; idx++) {
               visible.add(idx);
             }
           } else {
-            // Shift only → REPLACE with contiguous range
             visible.clear();
             for (let idx = start; idx <= end; idx++) {
               visible.add(idx);
             }
           }
-
         } else if (e.ctrlKey || e.metaKey) {
-          // --- Ctrl click: toggle one ---
           if (visible.has(i)) {
             visible.delete(i);
           } else {
@@ -377,9 +574,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
           if (visible.size === 0) {
             names.forEach((_, idx) => visible.add(idx));
           }
-
         } else {
-          // --- Normal click: single vs all ---
           if (currentlyVisible.length === names.length) {
             visible.clear();
             visible.add(i);
@@ -392,32 +587,381 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
           }
         }
 
-        lastClicked = i; // always update index
+        lastClicked = i;
 
-        // Update opacities
         itemsContainer.querySelectorAll('.legend-item').forEach((el, idx) => {
           el.style.opacity = visible.has(idx) ? '1' : '0.4';
         });
 
-        // Restore scroll position after DOM updates
-        requestAnimationFrame(() => {
-          scrollContainer.scrollTop = scrollTop;
-        });
+        itemsContainer.scrollTop = scrollTop;
 
-        redrawAllPlots(mainAnnotation);
+        redrawAllPlots(mainAnnotation).finally(() => {
+          isUpdatingVisibility = false;
+          setTimeout(() => {
+            itemsContainer.scrollTop = scrollTop;
+          }, 0);
+        });
       });
 
+      // Append elements to item
+      colorBoxContainer.appendChild(colorBox);
+      item.appendChild(colorBoxContainer);
+      item.appendChild(textSpan);
       itemsContainer.appendChild(item);
     });
-
 
     legendContainer.appendChild(itemsContainer);
   }
 
-  // Add legend as overlay
   plotContainer.appendChild(legendContainer);
+
+  // Make it draggable and resizable
+  makeLegendDraggableAndResizable(legendContainer, legendId);
 }
 
+// Add these global variables for legend positioning
+let legendPositions = new Map(); // Store positions for each legend
+let legendSizes = new Map(); // Store sizes for each legend
+
+// Function to update legend content layout when resized
+// Function to update legend content layout when resized
+function updateLegendContentLayout(legendContainer, width, height, type) {
+  const dragHandleHeight = 20;
+  const padding = 12;
+  const availableHeight = height - dragHandleHeight - padding;
+  const availableWidth = width - padding;
+
+  if (type === 'gene') {
+    // Update gene legend layout
+    const contentContainer = legendContainer.querySelector('div:not(.legend-drag-handle):not(.legend-resize-handle)');
+    if (contentContainer) {
+      // Scale the colorbar and text based on available space
+      const colorbarContainer = contentContainer.querySelector('div:nth-child(2)');
+      if (colorbarContainer) {
+        const colorbar = colorbarContainer.querySelector('div:first-child');
+        const textContainer = colorbarContainer.querySelector('div:last-child');
+        
+        if (colorbar && textContainer) {
+          // Scale colorbar height based on available space
+          const maxColorbarHeight = Math.min(120, availableHeight - 60); // Leave space for title and range text
+          const colorbarHeight = Math.max(60, maxColorbarHeight);
+          
+          colorbar.style.height = colorbarHeight + 'px';
+          textContainer.style.height = colorbarHeight + 'px';
+          
+          // Adjust font sizes for smaller widths
+          if (availableWidth < 130) {
+            contentContainer.style.fontSize = '10px';
+            const rangeText = contentContainer.querySelector('div:last-child');
+            if (rangeText) rangeText.style.fontSize = '8px';
+          } else {
+            contentContainer.style.fontSize = '11px';
+            const rangeText = contentContainer.querySelector('div:last-child');
+            if (rangeText) rangeText.style.fontSize = '9px';
+          }
+        }
+      }
+    }
+  } else {
+    // Update categorical legend layout
+    // Find the items container more reliably
+    let itemsContainer = null;
+    
+    // Method 1: Look for container with legend-item children
+    const containers = legendContainer.querySelectorAll('div');
+    for (let container of containers) {
+      if (container.classList.contains('legend-drag-handle') || 
+          container.classList.contains('legend-resize-handle')) {
+        continue;
+      }
+      
+      // Check if this container has legend-item children
+      if (container.querySelectorAll('.legend-item').length > 0) {
+        itemsContainer = container;
+        break;
+      }
+    }
+    
+    // Method 2: If not found, look for container with overflow-y auto or scroll
+    if (!itemsContainer) {
+      for (let container of containers) {
+        if (container.classList.contains('legend-drag-handle') || 
+            container.classList.contains('legend-resize-handle')) {
+          continue;
+        }
+        
+        const computedStyle = window.getComputedStyle(container);
+        if (computedStyle.overflowY === 'auto' || computedStyle.overflowY === 'scroll') {
+          itemsContainer = container;
+          break;
+        }
+      }
+    }
+    
+    console.log('Resizing legend - Available height:', availableHeight);
+    console.log('Items container found:', !!itemsContainer);
+    
+    if (itemsContainer) {
+      // Calculate the height for items container
+      // Account for title div (if present)
+      const titleDiv = legendContainer.querySelector('div:not(.legend-drag-handle):not(.legend-resize-handle)');
+      const titleHeight = (titleDiv && titleDiv !== itemsContainer) ? titleDiv.offsetHeight + 10 : 20; // 10px for margins
+      
+      const newHeight = Math.max(50, availableHeight - titleHeight);
+      console.log('Setting items container height to:', newHeight);
+      
+      // Apply the new height and ensure scrolling
+      itemsContainer.style.maxHeight = newHeight + 'px';
+      itemsContainer.style.height = newHeight + 'px';
+      itemsContainer.style.overflowY = 'auto';
+      itemsContainer.style.boxSizing = 'border-box';
+      
+      // Force a layout recalculation
+      itemsContainer.offsetHeight;
+      
+      // Adjust item layout for different widths
+      const items = itemsContainer.querySelectorAll('.legend-item');
+      items.forEach(item => {
+        const colorBox = item.querySelector('div:first-child');
+        const textSpan = item.querySelector('span');
+        
+        if (availableWidth < 120) {
+          // Compact layout for very narrow legends
+          item.style.padding = '2px';
+          item.style.fontSize = '9px';
+          if (colorBox) {
+            colorBox.style.width = '10px';
+            colorBox.style.height = '10px';
+            colorBox.style.marginRight = '4px';
+          }
+          if (textSpan) {
+            textSpan.style.fontSize = '9px';
+            textSpan.style.lineHeight = '1.1';
+          }
+        } else if (availableWidth < 140) {
+          // Medium compact layout
+          item.style.padding = '2px';
+          item.style.fontSize = '9px';
+          if (colorBox) {
+            colorBox.style.width = '11px';
+            colorBox.style.height = '11px';
+            colorBox.style.marginRight = '5px';
+          }
+          if (textSpan) {
+            textSpan.style.fontSize = '9px';
+            textSpan.style.lineHeight = '1.2';
+          }
+        } else {
+          // Normal layout
+          item.style.padding = '3px';
+          item.style.fontSize = '10px';
+          if (colorBox) {
+            colorBox.style.width = '12px';
+            colorBox.style.height = '12px';
+            colorBox.style.marginRight = '6px';
+          }
+          if (textSpan) {
+            textSpan.style.fontSize = '10px';
+            textSpan.style.lineHeight = 'normal';
+          }
+        }
+      });
+      
+      console.log('Final items container style:', {
+        maxHeight: itemsContainer.style.maxHeight,
+        height: itemsContainer.style.height,
+        overflowY: itemsContainer.style.overflowY
+      });
+    } else {
+      console.warn('Could not find items container in legend');
+    }
+  }
+}
+
+// Enhanced draggable and resizable functionality
+function makeLegendDraggableAndResizable(legendContainer, legendId) {
+  // Get the legend type from the legendId
+  const type = legendId.includes('_gene') ? 'gene' : 'categorical';
+  
+  // Get or set initial position and size
+  const savedPosition = legendPositions.get(legendId) || { x: null, y: null };
+  const savedSize = legendSizes.get(legendId) || { width: 150, height: null };
+
+  // Apply saved size
+  legendContainer.style.width = savedSize.width + 'px';
+  if (savedSize.height) {
+    legendContainer.style.height = savedSize.height + 'px';
+  }
+
+  // Apply saved position or default
+  if (savedPosition.x !== null && savedPosition.y !== null) {
+    legendContainer.style.right = 'auto';
+    legendContainer.style.left = savedPosition.x + 'px';
+    legendContainer.style.top = savedPosition.y + 'px';
+  }
+
+  // Create drag handle
+  const dragHandle = document.createElement('div');
+  dragHandle.className = 'legend-drag-handle';
+  dragHandle.style.cssText = `
+    width: 100%;
+    height: 20px;
+    background: rgba(0, 0, 0, 0.1);
+    cursor: move;
+    border-radius: 4px 4px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    color: #666;
+    user-select: none;
+    border-bottom: 1px solid #ddd;
+    flex-shrink: 0;
+  `;
+  dragHandle.innerHTML = '⋮⋮⋮';
+  dragHandle.title = 'Drag to move';
+
+  // Insert drag handle at the top
+  legendContainer.insertBefore(dragHandle, legendContainer.firstChild);
+
+  // Create resize handle
+  const resizeHandle = document.createElement('div');
+  resizeHandle.className = 'legend-resize-handle';
+  resizeHandle.style.cssText = `
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 12px;
+    height: 12px;
+    background: rgba(0, 0, 0, 0.2);
+    cursor: nw-resize;
+    border-radius: 0 0 4px 0;
+    z-index: 10;
+    flex-shrink: 0;
+  `;
+  resizeHandle.innerHTML = '◢';
+  resizeHandle.style.fontSize = '8px';
+  resizeHandle.style.color = '#999';
+  resizeHandle.style.lineHeight = '12px';
+  resizeHandle.style.textAlign = 'center';
+  resizeHandle.title = 'Drag to resize';
+  legendContainer.appendChild(resizeHandle);
+
+  // Make legend container relative for absolute positioning of children
+  legendContainer.style.position = 'absolute';
+  legendContainer.style.display = 'flex';
+  legendContainer.style.flexDirection = 'column';
+
+  // Dragging functionality
+  let isDragging = false;
+  let dragStartX, dragStartY, legendStartX, legendStartY;
+
+  dragHandle.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    
+    const rect = legendContainer.getBoundingClientRect();
+    const containerRect = legendContainer.offsetParent.getBoundingClientRect();
+    legendStartX = rect.left - containerRect.left;
+    legendStartY = rect.top - containerRect.top;
+    
+    e.preventDefault();
+    dragHandle.style.cursor = 'grabbing';
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    
+    const deltaX = e.clientX - dragStartX;
+    const deltaY = e.clientY - dragStartY;
+    
+    const newX = legendStartX + deltaX;
+    const newY = legendStartY + deltaY;
+    
+    // Keep within bounds
+    const containerRect = legendContainer.offsetParent.getBoundingClientRect();
+    const legendRect = legendContainer.getBoundingClientRect();
+    
+    const maxX = containerRect.width - legendRect.width;
+    const maxY = containerRect.height - legendRect.height;
+    
+    const clampedX = Math.max(0, Math.min(newX, maxX));
+    const clampedY = Math.max(0, Math.min(newY, maxY));
+    
+    legendContainer.style.left = clampedX + 'px';
+    legendContainer.style.top = clampedY + 'px';
+    legendContainer.style.right = 'auto';
+    
+    // Save position
+    legendPositions.set(legendId, { x: clampedX, y: clampedY });
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isDragging) {
+      isDragging = false;
+      dragHandle.style.cursor = 'move';
+    }
+  });
+
+  // Resizing functionality
+  let isResizing = false;
+  let resizeStartX, resizeStartY, legendStartWidth, legendStartHeight;
+
+  resizeHandle.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    resizeStartX = e.clientX;
+    resizeStartY = e.clientY;
+    legendStartWidth = legendContainer.offsetWidth;
+    legendStartHeight = legendContainer.offsetHeight;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    resizeHandle.style.cursor = 'nw-resize';
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    
+    const deltaX = e.clientX - resizeStartX;
+    const deltaY = e.clientY - resizeStartY;
+    
+    const newWidth = Math.max(120, legendStartWidth + deltaX); // Min width 120px
+    const newHeight = Math.max(100, legendStartHeight + deltaY); // Min height 100px
+    
+    legendContainer.style.width = newWidth + 'px';
+    legendContainer.style.height = newHeight + 'px';
+    
+    // Update content layout based on legend type
+    updateLegendContentLayout(legendContainer, newWidth, newHeight, type);
+    
+    // Save size
+    legendSizes.set(legendId, { width: newWidth, height: newHeight });
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isResizing) {
+      isResizing = false;
+      resizeHandle.style.cursor = 'nw-resize';
+    }
+  });
+
+  // Add double-click to reset position and size
+  dragHandle.addEventListener('dblclick', () => {
+    legendContainer.style.width = '150px';
+    legendContainer.style.height = 'auto';
+    legendContainer.style.right = '8px';
+    legendContainer.style.left = 'auto';
+    legendContainer.style.top = '8px';
+    
+    // Reset content layout to original
+    updateLegendContentLayout(legendContainer, 150, null, type);
+    
+    // Clear saved position and size
+    legendPositions.delete(legendId);
+    legendSizes.delete(legendId);
+  });
+}
 
 async function createGenePlot(geneId) {
   console.log(`Creating gene plot for ${geneId}`);
@@ -940,6 +1484,8 @@ function filterPoints() {
   
 }
 
+
+
 async function redrawAllPlots(mainAnnotation=null) {
   if (points.length === 0) return;
   
@@ -997,16 +1543,15 @@ async function redrawMainPlot(annotation=null) {
   if (!scatterplot || filteredPoints.length === 0) return;
 
   if (annotation !== null) {
-
+    // ... your existing color and pointSize setup code ...
+    
     console.log(annotation);
     
-    // if var_type not categorical, get viridis colors
     if (annotation.var_type != 'categorical') {
       colors = viridisColors
     } else {
       colors = annotation.colors;
     }
-
 
     if (filteredPoints.length < 300) {
       pointSize = 100;
@@ -1028,12 +1573,9 @@ async function redrawMainPlot(annotation=null) {
     scatterplot.set(config);
     await scatterplot.draw(filteredPoints, { transition: useTransition });
     
-    // if initScatterplot has been initialized, set x and y boundaries
+    // Your existing bounds/resizing code...
     if (initScatterplotPromise) {
-
       console.log("Resizing plot");
-
-      // Compute bounds for x and y
       const xs = filteredPoints.map(p => p[0]);
       const ys = filteredPoints.map(p => p[1]);
       const minX = Math.min(...xs);
@@ -1042,38 +1584,30 @@ async function redrawMainPlot(annotation=null) {
       const maxY = Math.max(...ys);
       const padX = (maxX - minX) * 0.1 || 1;
       const padY = (maxY - minY) * 0.1 || 1;
-      // let indices = Array.from({ length: pointsColored.length }, (_, i) => i);
-      // console.log(indices);
-      // scatterplot.zoomToPoints(indices);
-      scatterplot.zoomToArea(
-        { x: minX - padX, y: minY - padY,
-          width: maxX + padX - (minX - padX),
-          height: maxY + padY - (minY - padY)
-        }
-      )
-
-      // set initScatterplotPromise to null
+      
+      scatterplot.zoomToArea({
+        x: minX - padX, y: minY - padY,
+        width: maxX + padX - (minX - padX),
+        height: maxY + padY - (minY - padY)
+      });
+      
       initScatterplotPromise = null;
     }
 
+    // Only create/update legend if not in visibility update mode
     if (annotation.var_type == 'categorical') {
-
-      // Create legend for current annotation
       createPlotLegend('main', {
         names: annotation.names,
         colors: annotation.colors,
         visible: annotation.visible,
         annotationName: annotation.colorBy
       }, 'categorical');
-
     } else {
-
-      const values = Array.from(annotation.annotation); // ensure it's a real array
+      const values = Array.from(annotation.annotation);
       const minVal = Math.min(...values);
       const maxVal = Math.max(...values);
       const meanVal = values.reduce((a, b) => a + b, 0) / values.length;
 
-      console.log(minVal);
       createPlotLegend('main', {
         minVal: minVal.toFixed(2),
         maxVal: maxVal.toFixed(2),
@@ -1084,10 +1618,8 @@ async function redrawMainPlot(annotation=null) {
       }, 'gene');
     }
 
-
-
   } else {
-
+    // Your existing else block code...
     if (points.length < 300) {
       pointSize = 100;
     } else {
@@ -1101,10 +1633,7 @@ async function redrawMainPlot(annotation=null) {
     scatterplot.set(config);
     await scatterplot.draw(points, { transition: useTransition });
     
-    // if initScatterplot has been initialized, set x and y boundaries
     if (initScatterplotPromise) {
-
-      // Compute bounds for x and y
       const xs = points.map(p => p[0]);
       const ys = points.map(p => p[1]);
       const minX = xs.reduce((a, b) => Math.min(a, b), Infinity);
@@ -1113,17 +1642,13 @@ async function redrawMainPlot(annotation=null) {
       const maxY = ys.reduce((a, b) => Math.max(a, b), -Infinity);
       const padX = (maxX - minX) * 0.1 || 1;
       const padY = (maxY - minY) * 0.1 || 1;
-      // let indices = Array.from({ length: pointsColored.length }, (_, i) => i);
-      // console.log(indices);
-      // scatterplot.zoomToPoints(indices);
-      scatterplot.zoomToArea(
-        { x: minX - padX, y: minY - padY,
-          width: maxX + padX - (minX - padX),
-          height: maxY + padY - (minY - padY)
-        }
-      )
+      
+      scatterplot.zoomToArea({
+        x: minX - padX, y: minY - padY,
+        width: maxX + padX - (minX - padX),
+        height: maxY + padY - (minY - padY)
+      });
 
-      // set initScatterplotPromise to null
       initScatterplotPromise = null;
     }
   }
@@ -2004,3 +2529,40 @@ window.geneDebug = {
 
 // Initialize
 initScatterplot();
+
+
+// www/capture_canvas.js
+Shiny.addCustomMessageHandler('captureCanvases', function(message) {
+  console.log("Received captureCanvases message:", message);
+  console.log("Starting canvas capture...");
+  const canvases = document.querySelectorAll('canvas[id^="scatterplot_canvas"], canvas[id^="gene_canvas_"]');
+  console.log("Found", canvases.length, "canvases");
+  
+  const canvasData = {};
+  canvases.forEach(canvas => {
+    console.log("Capturing canvas:", canvas.id);
+    const ctx = canvas.getContext('webgl') || canvas.getContext('2d');
+    const pixel = ctx.getImageData(0, 0, 1, 1).data;
+    console.log("Canvas pixel check (top-left):", pixel);
+
+    // Create an offscreen canvas with same dimensions
+    const offscreen = document.createElement('canvas');
+    offscreen.width = canvas.width;
+    offscreen.height = canvas.height;
+    const offctx = offscreen.getContext('2d');
+
+    // Fill with white background
+    offctx.fillStyle = '#FFFFFF';
+    offctx.fillRect(0, 0, offscreen.width, offscreen.height);
+
+    // Draw original canvas on top
+    offctx.drawImage(canvas, 0, 0);
+
+    // Export as JPEG with white background
+    const dataURL = offscreen.toDataURL('image/jpeg', 0.8);
+    canvasData[canvas.id] = dataURL;
+  });
+
+  console.log("Sending canvas data to Shiny:", Object.keys(canvasData));
+  Shiny.setInputValue('canvas_data', canvasData, { priority: 'event' });
+});
