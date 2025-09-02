@@ -55,9 +55,9 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-use_condaenv("sc_rna_env_python2", required = TRUE)
+# use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-# use_condaenv("shiny_app_env", required = TRUE)
+use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
@@ -2928,9 +2928,10 @@ server <- function(input, output, session) {
         }
         
         # Create temporary directory for plots
-        temp_dir <- file.path(getwd(), "tmp")
-        plot_dir <- file.path(temp_dir, "plots")
-        dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+        # Use system temp directory instead of getwd()
+        temp_dir <- file.path(tempdir(), "plots")
+        dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
+        plot_dir <- temp_dir
         
         # Save static plots as image files
         saved_plots <- list()
