@@ -22,7 +22,7 @@ for (pkg in required_pkgs) {
 }
 
 # Python dependencies needed for fast Zarr/H5AD loading
-py_required <- c("zarr", "fsspec", "pandas", "numpy", "requests", "aiohttp")
+py_required <- c("zarr", "fsspec", "pandas", "numpy", "requests", "aiohttp", "scipy")
 
 # Install Python deps if missing
 for (pkg in py_required) {
