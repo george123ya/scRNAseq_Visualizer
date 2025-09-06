@@ -433,7 +433,7 @@ process_zarr_data_fast <- function(z, file_path) {
 
 
 # Helper function to process heatmap data
-process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by, values) {
+process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by) {
     # Fill missing values
     mat[is.na(mat)] <- 0
 
@@ -447,7 +447,7 @@ process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by, v
     # Cell grouping logic
     if (cell_group_mode == "categorical") {
         # req(cluster_by)
-        group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
+        group_var <- lazy_data$get_obs_column(lazy_data$zarr_obj, cluster_by)
         # req(length(group_var) == nrow(mat))
         
         group_levels <- sort(unique(group_var))
@@ -457,7 +457,7 @@ process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by, v
         mat <- t(mat)
     } else if (cell_group_mode == "none") {
         # req(cluster_by)
-        group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
+        group_var <- lazy_data$get_obs_column(lazy_data$zarr_obj, cluster_by)
         # req(length(group_var) == nrow(mat))
         
         group_levels <- sort(unique(group_var))
