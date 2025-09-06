@@ -443,3 +443,191 @@ load_umap_fast <- function(z) {
   
   return(df)
 }
+
+load_gene_info_fast <- function(var_group) {
+  tryCatch({
+    # Try different ways to get var index/gene names
+    var_attrs <- py_to_r(reticulate::import_builtins()$list(var_group$array_keys()))
+    cat("🔍 Available var attributes:", paste(var_attrs, collapse = ", "), "\n")
+    
+    # Try multiple possible index/name keys
+    index_keys <- c("_index", "index", "gene_ids", "var_names")
+    symbol_keys <- c("gene_symbols", "gene_symbol", "Symbol", "symbol", 'gene')
+
+    # symbol_keys <- c("gene_symbols", "gene_name", "symbol", "Symbol", 
+    #                       "gene_symbol", "Gene_Symbol", "SYMBOL", "name", 
+    #                       "Name", "feature_name")
+    
+    var_index <- NULL
+    for (key in index_keys) {
+      if (key %in% var_attrs) {
+        tryCatch({
+          var_index <- py_to_r(var_group[[key]][])
+          cat("✅ Found var index using key:", key, "\n")
+          break
+        }, error = function(e) {
+          next
+        })
+      }
+    }
+    
+    # If no index found, create sequential names
+    if (is.null(var_index)) {
+      # Try to get var shape from any available array
+      var_shape <- NULL
+      for (attr in var_attrs) {
+        tryCatch({
+          var_shape <- var_group[[attr]]$shape[[1]]
+          break
+        }, error = function(e) {
+          next
+        })
+      }
+      
+      if (is.null(var_shape)) {
+        stop("Could not determine number of genes")
+      }
+      
+      var_index <- paste0("GENE_", seq_len(var_shape))
+      cat("⚠️ No gene index found, created sequential names\n")
+    }
+    
+    # Try to get gene symbols
+    display_names <- var_index  # default to using index
+    for (key in symbol_keys) {
+      if (key %in% var_attrs) {
+        tryCatch({
+          gene_symbols <- py_to_r(var_group[[key]][])
+          # Use symbols where available, fall back to index
+          display_names <- ifelse(is.na(gene_symbols) | gene_symbols == "" | gene_symbols == "nan", 
+                                var_index, gene_symbols)
+          cat("✅ Found gene symbols using key:", key, "\n")
+          break
+        }, error = function(e) {
+          next
+        })
+      }
+    }
+    
+    var_df <- data.frame(
+      gene_id = var_index,
+      gene_symbol = display_names,
+      stringsAsFactors = FALSE
+    )
+    
+    # Add other var columns if they exist
+    for (attr in var_attrs) {
+      if (!(attr %in% c(index_keys, symbol_keys))) {
+        tryCatch({
+          var_df[[attr]] <- py_to_r(var_group[[attr]][])
+        }, error = function(e) {
+          cat("⚠️ Could not load var attribute:", attr, "-", e$message, "\n")
+        })
+      }
+    }
+    
+    return(list(
+      display_names = display_names,
+      var_df = var_df,
+      gene_ids = var_index
+    ))
+    
+  }, error = function(e) {
+    cat("⚠️ Gene info loading failed, using fallback:", e$message, "\n")
+    # Create minimal fallback
+    return(list(
+      display_names = paste0("GENE_", 1:1000),  # placeholder
+      var_df = data.frame(gene_id = paste0("GENE_", 1:1000), stringsAsFactors = FALSE),
+      gene_ids = paste0("GENE_", 1:1000)
+    ))
+  })
+}
+
+#' Get obs columns quickly
+get_obs_columns_fast <- function(obs_group) {
+  tryCatch({
+    # materialize the keys generator
+    py_list <- reticulate::import_builtins()$list
+    obs_keys <- py_to_r(py_list(obs_group$keys()))
+    
+    cat("🔍 Available obs columns:", paste(head(obs_keys, 10), collapse = ", "), 
+        if(length(obs_keys) > 10) "..." else "", "\n")
+    return(obs_keys)
+  }, error = function(e) {
+    cat("⚠️ Could not get obs columns:", e$message, "\n")
+    return(character(0))
+  })
+}
+
+
+#' Get obsm keys quickly  
+get_obsm_keys_fast <- function(z, zarr_keys) {
+  tryCatch({
+    if ("obsm" %in% zarr_keys) {
+      obsm_group <- z[["obsm"]]
+      return(py_to_r(reticulate::import_builtins()$list(obsm_group$array_keys())))
+    } else {
+      return(character(0))
+    }
+  }, error = function(e) {
+    cat("⚠️ Could not get obsm keys:", e$message, "\n")
+    return(character(0))
+  })
+}
+
+#' Get var keys quickly
+get_var_keys_fast <- function(z, zarr_keys) {
+  tryCatch({
+    if ("var" %in% zarr_keys) {
+      var_group <- z[["var"]]
+      return(py_to_r(reticulate::import_builtins()$list(var_group$keys())))
+    } else {
+      return(character(0))
+    }
+  }, error = function(e) {
+    cat("⚠️ Could not get var keys:", e$message, "\n")
+    return(character(0))
+  })
+}
+
+#' Get layer keys quickly
+get_layer_keys_fast <- function(z, zarr_keys) {
+  tryCatch({
+    if ("layers" %in% zarr_keys) {
+      layers_group <- z[["layers"]]
+      return(py_to_r(reticulate::import_builtins()$list(layers_group$keys())))
+    } else {
+      return(character(0))
+    }
+  }, error = function(e) {
+    cat("⚠️ Could not get layer keys:", e$message, "\n")
+    return(character(0))
+  })
+}
+
+#' Fast SEACells loading
+load_seacells_fast <- function(z, zarr_keys) {
+  tryCatch({
+    if ("uns" %in% zarr_keys) {
+      uns_group <- z[["uns"]]
+      uns_subkeys <- py_to_r(reticulate::import_builtins()$list(uns_group$group_keys()))
+      
+      if ("SEACells_summary" %in% uns_subkeys) {
+        seacell_summary <- uns_group[["SEACells_summary"]]
+        seacell_umap <- py_to_r(seacell_summary[["obsm"]][["X_umap"]][])
+        
+        seacell_df <- as.data.frame(seacell_umap)
+        colnames(seacell_df) <- c("UMAP_1", "UMAP_2")
+        seacell_df$SEACell <- py_to_r(seacell_summary[["obs"]][["_index"]][])
+        seacell_df$cell_type <- py_to_r(seacell_summary[["obs"]][["cluster_feature"]][])
+        
+        cat("🔬 Loaded SEACells metacells:", nrow(seacell_df), "\n")
+        return(seacell_df)
+      }
+    }
+    return(NULL)
+  }, error = function(e) {
+    cat("⚠️ Could not load SEACells data:", e$message, "\n")
+    return(NULL)
+  })
+}
