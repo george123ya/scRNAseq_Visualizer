@@ -433,7 +433,7 @@ process_zarr_data_fast <- function(z, file_path) {
 
 
 # Helper function to process heatmap data
-process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by) {
+process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by, values) {
     # Fill missing values
     mat[is.na(mat)] <- 0
 
