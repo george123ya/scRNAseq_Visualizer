@@ -405,3 +405,41 @@ if (!is.null(data$group_info)) {
     )
 }
 }
+
+load_umap_fast <- function(z) {
+  umap_keys <- c("X_umap_normal", "X_umap", "X_umap_magic")
+  umap <- NULL
+  umap_key_used <- NULL
+
+  py_list <- reticulate::import_builtins()$list
+  obsm_keys <- reticulate::py_to_r(py_list(z[["obsm"]]$keys()))
+
+  for (k in umap_keys) {
+    if (k %in% obsm_keys) {
+      umap <- reticulate::py_to_r(z[["obsm"]][[k]][])
+      umap_key_used <- k
+      break
+    }
+  }
+  
+  if (is.null(umap)) stop("❌ No UMAP coordinates found.")
+  
+  df <- as.data.frame(umap)
+  colnames(df) <- c("x", "y")
+  # Try MAGIC UMAP if available
+  if ("X_umap_magic" %in% obsm_keys && umap_key_used != "X_umap_magic") {
+    umap_magic <- reticulate::py_to_r(z[["obsm"]][["X_umap_magic"]][] )
+    df$magic_x <- umap_magic[, 1]
+    df$magic_y <- umap_magic[, 2]
+    cat("✨ Loaded MAGIC UMAP coordinates\n")
+  } else if (umap_key_used == "X_umap_magic") {
+    df$magic_x <- df$x
+    df$magic_y <- df$y
+    cat("✨ Using main UMAP as MAGIC coordinates\n")
+  } else {
+    df$magic_x <- NA
+    df$magic_y <- NA
+  }
+  
+  return(df)
+}
