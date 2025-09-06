@@ -1,3 +1,44 @@
+## ---------------------------------------------------------------
+## Dependency checks and safe imports
+## ---------------------------------------------------------------
+
+# List of required R packages
+required_pkgs <- c(
+  "reticulate",
+  "ComplexHeatmap",
+  "RColorBrewer",
+  "grid",
+  "peakRAM"
+)
+
+# Check and load R packages
+for (pkg in required_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    stop("❌ Required R package '", pkg, "' is not installed. ",
+         "Please install it with install.packages('", pkg, "')")
+  } else {
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+  }
+}
+
+# Python dependencies needed for fast Zarr/H5AD loading
+py_required <- c("zarr", "fsspec", "pandas", "numpy")
+
+# Install Python deps if missing
+for (pkg in py_required) {
+  if (!reticulate::py_module_available(pkg)) {
+    message("⚠️ Python module '", pkg, "' not found. Installing...")
+    reticulate::py_install(pkg, pip = TRUE)
+  }
+}
+
+# Safe imports with delay_load = TRUE
+zarr   <- reticulate::import("zarr", delay_load = TRUE)
+fsspec <- reticulate::import("fsspec", delay_load = TRUE)
+pd     <- reticulate::import("pandas", delay_load = TRUE)
+np     <- reticulate::import("numpy", delay_load = TRUE)
+
+
 init_fast_zarr_h5ad <- function(file_path) {
   cat("Initializing fast loader:", file_path, "\n")
   

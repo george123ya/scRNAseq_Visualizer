@@ -35,46 +35,35 @@ This report was written by [George Muñoz](https://github.com/george123ya) at th
 
 ## Visualization Results
 
-```{r heatmap-section-header, results='asis'}
-heatmap_count <- sum(c(!is.null(saved_plots$heatmap1), !is.null(saved_plots$heatmap2)))
-
-if(heatmap_count > 0) {
-  cat("### Heatmap Analysis\n\n")
-  cat("The following heatmap visualizations were generated:\n\n")
-}
-```
-
-```{r heatmap1-header, eval=!is.null(saved_plots$heatmap1), results='asis'}
-cat("#### Heatmap 1 - Individual Genes\n\n")
-```
-
 ```{r heatmap1-details, eval=!is.null(saved_plots$heatmap1), results='asis'}
 if(!is.null(user_inputs$heatmap_genes_panel1)) {
   cat("**Input Parameters:**\n\n")
-  cat("- **Genes:** ", user_inputs$heatmap_genes_panel1, "\n")
-  cat("- **Score Type:** ", user_inputs$heatmap_score_panel1, "\n")
-  cat("- **Cell Grouping Mode:** ", user_inputs$heatmap_cell_group_mode_panel1, "\n")
-  cat("- **Cluster/Color By:** ", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "None", user_inputs$heatmap_cluster_by_panel1), "\n\n")
+  cat("- **Genes:**", user_inputs$heatmap_genes_panel1, "\n")
+  cat("- **Score Type:**", user_inputs$heatmap_score_panel1, "\n")
+  cat("- **Cell Grouping Mode:**", user_inputs$heatmap_cell_group_mode_panel1, "\n")
+  cat("- **Cluster/Color By:**", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "None", user_inputs$heatmap_cluster_by_panel1), "\n\n")
   
   cat("**Reproducible Code:**\n\n")
   cat("```r\n")
-  cat("# Install and load the analysis package\n")
-  cat("devtools::install_github('yourusername/yourrepo')\n")
-  cat("library(yourpackagename)  # This loads ComplexHeatmap and other dependencies\n\n")
+  cat("# Load analysis functions\n")
+  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
   
   cat("# Initialize data connection\n")
   cat("zarr_file <- 'path/to/your/dataset.zarr'  # or .h5ad file\n")
   cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
   
   cat("# Process genes for Panel 1\n")
-  cat("genes <- c(", paste(paste0("\"", trimws(unlist(strsplit(user_inputs$heatmap_genes_panel1, ",|\\s+"))), "\""), collapse = ", "), ")\n")
+  # Clean up genes and remove empty strings, then format properly
+  genes_clean <- trimws(unlist(strsplit(user_inputs$heatmap_genes_panel1, ",|\\s+")))
+  genes_clean <- genes_clean[genes_clean != "" & !is.na(genes_clean)]
+  cat("genes <- c(", paste(paste0("\"", genes_clean, "\""), collapse = ","), ")\n")
   cat("genes <- toupper(trimws(genes))\n")
   cat("genes <- genes[genes %in% toupper(lazy_data$genes)]\n\n")
   
   cat("# Extract expression data\n")
-  cat("expr_mat <- lazy_data$get_genes_expression_batch(genes, layer = 'X')\n")
-  cat("if (is.null(expr_mat)) {\n")
-  cat("  mat <- matrix(NA, nrow = lazy_data$n_cells, ncol = length(genes))\n")
+  cat("expr_mat <- lazy_data$get_genes_expression_batch(genes, layer='X')\n")
+  cat("if(is.null(expr_mat)) {\n")
+  cat("  mat <- matrix(NA, nrow=lazy_data$n_cells, ncol=length(genes))\n")
   cat("  colnames(mat) <- genes\n")
   cat("} else {\n")
   cat("  mat <- expr_mat\n")
@@ -82,52 +71,55 @@ if(!is.null(user_inputs$heatmap_genes_panel1)) {
   
   cat("# Process heatmap data\n")
   cat("heatmap_data <- process_heatmap_data(\n")
-  cat("  mat = mat,\n")
-  cat("  score_type = '", user_inputs$heatmap_score_panel1, "',\n")
-  cat("  cell_group_mode = '", user_inputs$heatmap_cell_group_mode_panel1, "',\n")
-  cat("  cluster_by = '", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "", user_inputs$heatmap_cluster_by_panel1), "'\n")
+  cat("  mat=mat,\n")
+  cat("  score_type=\"", user_inputs$heatmap_score_panel1, "\",\n")
+  cat("  cell_group_mode=\"", user_inputs$heatmap_cell_group_mode_panel1, "\",\n")
+  cat("  cluster_by=\"", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "", user_inputs$heatmap_cluster_by_panel1), "\"\n")
   cat(")\n\n")
   
   cat("# Generate heatmap\n")
-  cat("heatmap_plot <- render_heatmap(heatmap_data, 'Panel 1: Individual Genes')\n")
+  cat("heatmap_plot <- render_heatmap(heatmap_data, \"Panel 1: Individual Genes\")\n")
   cat("print(heatmap_plot)\n")
   cat("```\n\n")
   
-  cat("🔗 **Complete Package:** https://github.com/yourusername/yourrepo\n\n")
+  cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
 }
 ```
 
 ```{r heatmap2-details, eval=!is.null(saved_plots$heatmap2), results='asis'}
 if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
   cat("**Input Parameters:**\n\n")
-  cat("- **Gene Group Mode:** ", user_inputs$heatmap_gene_group_mode_panel2, "\n")
-  cat("- **Score Type:** ", user_inputs$heatmap_score_panel2, "\n")
-  cat("- **Cell Grouping Mode:** ", user_inputs$heatmap_cell_group_mode_panel2, "\n")
-  cat("- **Cluster/Color By:** ", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "None", user_inputs$heatmap_cluster_by_panel2), "\n")
+  cat("- **Gene Group Mode:**", user_inputs$heatmap_gene_group_mode_panel2, "\n")
+  cat("- **Score Type:**", user_inputs$heatmap_score_panel2, "\n")
+  cat("- **Cell Grouping Mode:**", user_inputs$heatmap_cell_group_mode_panel2, "\n")
+  cat("- **Cluster/Color By:**", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "None", user_inputs$heatmap_cluster_by_panel2), "\n")
   
   # Show specific selections based on mode
   if(user_inputs$heatmap_gene_group_mode_panel2 == "pathways" && !is.null(user_inputs$heatmap_pathway_select_panel2)) {
-    cat("- **Selected Pathways:** ", paste(user_inputs$heatmap_pathway_select_panel2, collapse = ", "), "\n")
+    cat("- **Selected Pathways:**", paste(user_inputs$heatmap_pathway_select_panel2, collapse=", "), "\n")
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "custom_gmt" && !is.null(user_inputs$heatmap_gmt_sets_panel2)) {
-    cat("- **Selected GMT Gene Sets:** ", paste(user_inputs$heatmap_gmt_sets_panel2, collapse = ", "), "\n")
+    cat("- **Selected GMT Gene Sets:**", paste(user_inputs$heatmap_gmt_sets_panel2, collapse=", "), "\n")
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "manual" && !is.null(user_inputs$selected_manual_genesets)) {
-    cat("- **Selected Manual Gene Sets:** ", paste(user_inputs$selected_manual_genesets, collapse = ", "), "\n")
+    cat("- **Selected Manual Gene Sets:**", paste(user_inputs$selected_manual_genesets, collapse=", "), "\n")
   }
   cat("\n")
   
   cat("**Reproducible Code:**\n\n")
   cat("```r\n")
-  cat("# Using the same setup as Panel 1:\n")
-  cat("# library(yourpackagename)\n")
-  cat("# lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
+  cat("# Load analysis functions\n")
+  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
+  
+  cat("# Initialize data connection\n")
+  cat("zarr_file <- 'path/to/your/dataset.zarr'  # or .h5ad file\n")
+  cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
   
   if(user_inputs$heatmap_gene_group_mode_panel2 == "pathways") {
-    cat("# Load pathway data (included in package or lazy_data)\n")
+    cat("# Load pathway data\n")
     cat("pathways <- lazy_data$pathways\n")
     if("ALL" %in% user_inputs$heatmap_pathway_select_panel2) {
       cat("gene_groups <- pathways  # All pathways selected\n")
     } else {
-      cat("selected_pathways <- c(", paste(paste0("\"", user_inputs$heatmap_pathway_select_panel2, "\""), collapse = ", "), ")\n")
+      cat("selected_pathways <- c(", paste(paste0("\"", user_inputs$heatmap_pathway_select_panel2, "\""), collapse=","), ")\n")
       cat("gene_groups <- pathways[selected_pathways]\n")
     }
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "custom_gmt") {
@@ -136,7 +128,7 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
     if("ALL" %in% user_inputs$heatmap_gmt_sets_panel2) {
       cat("gene_groups <- gmt_data  # All GMT gene sets selected\n")
     } else {
-      cat("selected_gmt <- c(", paste(paste0("\"", user_inputs$heatmap_gmt_sets_panel2, "\""), collapse = ", "), ")\n")
+      cat("selected_gmt <- c(", paste(paste0("\"", user_inputs$heatmap_gmt_sets_panel2, "\""), collapse=","), ")\n")
       cat("gene_groups <- gmt_data[selected_gmt]\n")
     }
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "manual") {
@@ -144,7 +136,7 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
     cat("manual_genesets <- list(\n")
     if(!is.null(user_inputs$selected_manual_genesets)) {
       for(i in seq_along(user_inputs$selected_manual_genesets)) {
-        cat("  '", user_inputs$selected_manual_genesets[i], "' = c('GENE1', 'GENE2', 'GENE3')")
+        cat("  \"", user_inputs$selected_manual_genesets[i], "\"=c(\"GENE1\",\"GENE2\",\"GENE3\")")
         if(i < length(user_inputs$selected_manual_genesets)) cat(",")
         cat("\n")
       }
@@ -155,24 +147,20 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
   
   cat("\n# Calculate gene set scores and create heatmap\n")
   cat("heatmap_data <- calculate_geneset_scores(\n")
-  cat("  lazy_data = lazy_data,\n")
-  cat("  gene_groups = gene_groups,\n")
-  cat("  score_type = '", user_inputs$heatmap_score_panel2, "',\n")
-  cat("  cell_group_mode = '", user_inputs$heatmap_cell_group_mode_panel2, "',\n")
-  cat("  cluster_by = '", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "", user_inputs$heatmap_cluster_by_panel2), "'\n")
+  cat("  lazy_data=lazy_data,\n")
+  cat("  gene_groups=gene_groups,\n")
+  cat("  score_type=\"", user_inputs$heatmap_score_panel2, "\",\n")
+  cat("  cell_group_mode=\"", user_inputs$heatmap_cell_group_mode_panel2, "\",\n")
+  cat("  cluster_by=\"", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "", user_inputs$heatmap_cluster_by_panel2), "\"\n")
   cat(")\n\n")
   
   cat("# Generate heatmap\n")
-  cat("heatmap_plot <- render_heatmap(heatmap_data, 'Panel 2: Gene Sets')\n")
+  cat("heatmap_plot <- render_heatmap(heatmap_data, \"Panel 2: Gene Sets\")\n")
   cat("print(heatmap_plot)\n")
   cat("```\n\n")
   
-  cat("🔗 **Complete Package:** https://github.com/yourusername/yourrepo\n\n")
+  cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
 }
-```
-
-```{r heatmap2-plot, eval=!is.null(saved_plots$heatmap2)}
-include_graphics(normalizePath(saved_plots$heatmap2))
 ```
 
 ```{r gene-section-header, eval=!is.null(saved_plots$gene_main), results='asis'}
@@ -183,14 +171,12 @@ cat("### Gene Expression Analysis\n\n")
 cat("#### Main Gene Analysis Plot\n\n")
 ```
 
-```{r gene-analysis-details, eval=!is.null(saved_plots$gene_main), results='asis'}
-# Add similar parameter display for gene analysis if you have the user_inputs values stored
-cat("**Plot Details:**\n\n")
-cat("This plot shows the main gene expression analysis results.\n\n")
-```
-
 ```{r gene-analysis-plot, eval=!is.null(saved_plots$gene_main)}
 include_graphics(normalizePath(saved_plots$gene_main))
+```
+
+```{r gene-analysis-text, eval=!is.null(saved_plots$gene_main), results='asis'}
+cat("\n\nThis plot shows the main gene expression analysis results.\n")
 ```
 
 ```{r qc-section-header, eval=!is.null(saved_plots$qc_main), results='asis'}
@@ -201,14 +187,12 @@ cat("### Quality Control\n\n")
 cat("#### Quality Control Plot\n\n")
 ```
 
-```{r qc-analysis-details, eval=!is.null(saved_plots$qc_main), results='asis'}
-# Add similar parameter display for QC if you have the user_inputs values stored
-cat("**Plot Details:**\n\n")
-cat("This plot displays the quality control metrics for the analysis.\n\n")
-```
-
 ```{r qc-analysis-plot, eval=!is.null(saved_plots$qc_main)}
 include_graphics(normalizePath(saved_plots$qc_main))
+```
+
+```{r qc-analysis-text, eval=!is.null(saved_plots$qc_main), results='asis'}
+cat("\n\nThis plot displays the quality control metrics for the analysis.\n")
 ```
 
 ```{r canvas-section-header, results='asis'}
