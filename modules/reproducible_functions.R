@@ -38,6 +38,129 @@ fsspec <- reticulate::import("fsspec", delay_load = TRUE)
 pd     <- reticulate::import("pandas", delay_load = TRUE)
 np     <- reticulate::import("numpy", delay_load = TRUE)
 
+reticulate::py_run_string("
+import zarr
+import numpy as np
+from scipy.sparse import csc_matrix, hstack
+
+def get_gene_fast(z_csc, gene_index, layer='X'):
+    # Get number of cells
+    n_cells = z_csc['obs'][list(z_csc['obs'].array_keys())[0]].shape[0]
+    
+    # Select correct CSC structure
+    if layer == 'X':
+        csc = z_csc['X']
+    else:
+        csc = z_csc['layers'][layer]
+
+    # Get start and end positions for this gene in the selected layer
+    start_idx = csc['indptr'][gene_index]
+    end_idx = csc['indptr'][gene_index + 1]
+
+    # If gene has no expression values
+    if start_idx == end_idx:
+        return np.zeros(n_cells, dtype=np.float32)
+
+    # Get the cell indices and expression values for this gene
+    cell_indices = csc['indices'][start_idx:end_idx]
+    values = csc['data'][start_idx:end_idx]
+
+    # Create full expression vector
+    expression = np.zeros(n_cells, dtype=np.float32)
+    expression[cell_indices] = values
+    
+    return expression
+
+# Optimized get_genes_batch for non-contiguous indices
+def get_genes_batch(z_csc, gene_indices, layer='X', batch_size=1000):
+    n_cells = z_csc['obs'][next(iter(z_csc['obs'].array_keys()))].shape[0]
+    csc = z_csc['X'] if layer == 'X' else z_csc['layers'][layer]
+    
+    # Cache indptr to reduce cloud fetches
+    indptr = csc['indptr'][:]
+    indices = csc['indices']
+    data = csc['data']
+    
+    # Sort gene indices
+    sorted_indices = sorted(enumerate(gene_indices), key=lambda x: x[1])
+    sorted_genes = [x[1] for x in sorted_indices]
+    original_order = [x[0] for x in sorted_indices]
+    
+    if not sorted_genes:
+        return csc_matrix((n_cells, 0), dtype=np.float32)
+    
+    # Initialize lists for non-zero entries
+    all_row_indices = []
+    all_col_indices = []
+    all_data_values = []
+    
+    # Process genes in batches
+    for batch_start in range(0, len(sorted_genes), batch_size):
+        batch_end = min(batch_start + batch_size, len(sorted_genes))
+        batch_genes = sorted_genes[batch_start:batch_end]
+        
+        if not batch_genes:
+            continue
+        
+        # Get the range of data we need to fetch
+        min_gene = batch_genes[0]
+        max_gene = batch_genes[-1]
+        
+        # Fetch indptr for the full range
+        range_indptr = indptr[min_gene:max_gene+2]
+        start_idx = range_indptr[0]
+        end_idx = range_indptr[-1]
+        
+        if start_idx < end_idx:
+            # Fetch the contiguous block of data
+            batch_indices = indices[start_idx:end_idx]
+            batch_data = data[start_idx:end_idx]
+        else:
+            batch_indices = np.array([], dtype=np.int32)
+            batch_data = np.array([], dtype=np.float32)
+        
+        # Process each gene in this batch
+        for local_i, gene_idx in enumerate(batch_genes):
+            # Calculate relative position within the fetched range
+            rel_pos = gene_idx - min_gene
+            s_rel = range_indptr[rel_pos] - start_idx
+            e_rel = range_indptr[rel_pos + 1] - start_idx
+            
+            if s_rel < e_rel:
+                # Global column index (position in the sorted list)
+                global_col_idx = batch_start + local_i
+                
+                # Extract data for this specific gene
+                gene_row_indices = batch_indices[s_rel:e_rel]
+                gene_data = batch_data[s_rel:e_rel]
+                
+                # Add to global lists
+                all_row_indices.append(gene_row_indices)
+                all_col_indices.append(np.full(len(gene_row_indices), global_col_idx, dtype=np.int32))
+                all_data_values.append(gene_data)
+    
+    # Combine all non-zero entries
+    if not all_row_indices:
+        return csc_matrix((n_cells, len(gene_indices)), dtype=np.float32)
+    
+    all_row_indices = np.concatenate(all_row_indices)
+    all_col_indices = np.concatenate(all_col_indices)
+    all_data_values = np.concatenate(all_data_values)
+    
+    # Create final sparse matrix
+    result_mat = csc_matrix(
+        (all_data_values, (all_row_indices, all_col_indices)),
+        shape=(n_cells, len(gene_indices)),
+        dtype=np.float32
+    )
+    
+    # Reorder columns to match original gene_indices order
+    inverse_order = np.argsort(original_order)
+    result_mat = result_mat[:, inverse_order]
+    
+    return result_mat.toarray()
+")
+
 
 init_fast_zarr_h5ad <- function(file_path) {
   cat("Initializing fast loader:", file_path, "\n")
