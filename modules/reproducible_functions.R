@@ -446,9 +446,9 @@ process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by) {
     group_info <- NULL
     # Cell grouping logic
     if (cell_group_mode == "categorical") {
-        req(cluster_by)
+        # req(cluster_by)
         group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
-        req(length(group_var) == nrow(mat))
+        # req(length(group_var) == nrow(mat))
         
         group_levels <- sort(unique(group_var))
         group_var <- factor(group_var, levels = group_levels)
@@ -456,9 +456,9 @@ process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by) {
         mat <- sapply(colnames(mat), function(g) tapply(mat[, g], group_var, mean, na.rm = TRUE))
         mat <- t(mat)
     } else if (cell_group_mode == "none") {
-        req(cluster_by)
+        # req(cluster_by)
         group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
-        req(length(group_var) == nrow(mat))
+        # req(length(group_var) == nrow(mat))
         
         group_levels <- sort(unique(group_var))
         group_var <- factor(group_var, levels = group_levels)
