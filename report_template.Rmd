@@ -1,7 +1,7 @@
 ---
-title: "Comprehensive Analysis Report"
-author: "Generated from Shiny Application"
-date: "`r Sys.Date()`"
+title: "scRNA-seq Report for dataset: `r basename(params$app_data$user_inputs$dataset)`"
+# author: "Generated from Shiny Application"
+# date: "`r Sys.Date()`"
 output: 
   html_document:
     theme: flatly
@@ -27,95 +27,234 @@ user_inputs <- params$app_data$user_inputs
 timestamp <- params$app_data$timestamp
 ```
 
-# Analysis Report
+**Generated on:** `r format(timestamp, "%Y-%m-%d %H:%M:%S")`
 
-**Generated on:** `r timestamp`
+The [Bioinformatics Resource Center](https://rockefelleruniversity.github.io/) scRNA-seq Browser provides an interactive platform for exploring single-cell RNA sequencing data. This report summarizes the key visualizations and analyses performed during your session.
 
-## Executive Summary
-
-This comprehensive report contains all visualizations and analysis results generated from the Shiny application, capturing the current state of your analysis including heatmaps, gene analysis plots, quality control visualizations, and static images of interactive canvas elements.
-
+This report was written by [George Muñoz](https://github.com/george123ya) at the Rockefeller University Bioinformatics Resource Center with contributions by [Luis Soto-Ugaldi](https://github.com/SotoLF), [Doug Barrows](https://github.com/dougbarrows) and [Thomas Carroll](https://github.com/ThomasCarroll) from the BRC.
 
 ## Visualization Results
 
-### Heatmap Analysis
-
-```{r heatmap-section, results='asis'}
+```{r heatmap-section-header, results='asis'}
 heatmap_count <- sum(c(!is.null(saved_plots$heatmap1), !is.null(saved_plots$heatmap2)))
 
 if(heatmap_count > 0) {
+  cat("### Heatmap Analysis\n\n")
   cat("The following heatmap visualizations were generated:\n\n")
-} else {
-  cat("No heatmap visualizations were generated in this session.\n\n")
 }
 ```
 
-```{r heatmap1, eval=!is.null(saved_plots$heatmap1)}
-cat("#### Heatmap 1\n\n")
-include_graphics(normalizePath(saved_plots$heatmap1))
+```{r heatmap1-header, eval=!is.null(saved_plots$heatmap1), results='asis'}
+cat("#### Heatmap 1 - Individual Genes\n\n")
 ```
 
-```{r heatmap2, eval=!is.null(saved_plots$heatmap2)}
-cat("#### Heatmap 2\n\n")
+```{r heatmap1-details, eval=!is.null(saved_plots$heatmap1), results='asis'}
+if(!is.null(user_inputs$heatmap_genes_panel1)) {
+  cat("**Input Parameters:**\n\n")
+  cat("- **Genes:** ", user_inputs$heatmap_genes_panel1, "\n")
+  cat("- **Score Type:** ", user_inputs$heatmap_score_panel1, "\n")
+  cat("- **Cell Grouping Mode:** ", user_inputs$heatmap_cell_group_mode_panel1, "\n")
+  cat("- **Cluster/Color By:** ", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "None", user_inputs$heatmap_cluster_by_panel1), "\n\n")
+  
+  cat("**Reproducible Code:**\n\n")
+  cat("```r\n")
+  cat("# Install and load the analysis package\n")
+  cat("devtools::install_github('yourusername/yourrepo')\n")
+  cat("library(yourpackagename)  # This loads ComplexHeatmap and other dependencies\n\n")
+  
+  cat("# Initialize data connection\n")
+  cat("zarr_file <- 'path/to/your/dataset.zarr'  # or .h5ad file\n")
+  cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
+  
+  cat("# Process genes for Panel 1\n")
+  cat("genes <- c(", paste(paste0("\"", trimws(unlist(strsplit(user_inputs$heatmap_genes_panel1, ",|\\s+"))), "\""), collapse = ", "), ")\n")
+  cat("genes <- toupper(trimws(genes))\n")
+  cat("genes <- genes[genes %in% toupper(lazy_data$genes)]\n\n")
+  
+  cat("# Extract expression data\n")
+  cat("expr_mat <- lazy_data$get_genes_expression_batch(genes, layer = 'X')\n")
+  cat("if (is.null(expr_mat)) {\n")
+  cat("  mat <- matrix(NA, nrow = lazy_data$n_cells, ncol = length(genes))\n")
+  cat("  colnames(mat) <- genes\n")
+  cat("} else {\n")
+  cat("  mat <- expr_mat\n")
+  cat("}\n\n")
+  
+  cat("# Process heatmap data\n")
+  cat("heatmap_data <- process_heatmap_data(\n")
+  cat("  mat = mat,\n")
+  cat("  score_type = '", user_inputs$heatmap_score_panel1, "',\n")
+  cat("  cell_group_mode = '", user_inputs$heatmap_cell_group_mode_panel1, "',\n")
+  cat("  cluster_by = '", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "", user_inputs$heatmap_cluster_by_panel1), "'\n")
+  cat(")\n\n")
+  
+  cat("# Generate heatmap\n")
+  cat("heatmap_plot <- render_heatmap(heatmap_data, 'Panel 1: Individual Genes')\n")
+  cat("print(heatmap_plot)\n")
+  cat("```\n\n")
+  
+  cat("🔗 **Complete Package:** https://github.com/yourusername/yourrepo\n\n")
+}
+```
+
+```{r heatmap2-details, eval=!is.null(saved_plots$heatmap2), results='asis'}
+if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
+  cat("**Input Parameters:**\n\n")
+  cat("- **Gene Group Mode:** ", user_inputs$heatmap_gene_group_mode_panel2, "\n")
+  cat("- **Score Type:** ", user_inputs$heatmap_score_panel2, "\n")
+  cat("- **Cell Grouping Mode:** ", user_inputs$heatmap_cell_group_mode_panel2, "\n")
+  cat("- **Cluster/Color By:** ", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "None", user_inputs$heatmap_cluster_by_panel2), "\n")
+  
+  # Show specific selections based on mode
+  if(user_inputs$heatmap_gene_group_mode_panel2 == "pathways" && !is.null(user_inputs$heatmap_pathway_select_panel2)) {
+    cat("- **Selected Pathways:** ", paste(user_inputs$heatmap_pathway_select_panel2, collapse = ", "), "\n")
+  } else if(user_inputs$heatmap_gene_group_mode_panel2 == "custom_gmt" && !is.null(user_inputs$heatmap_gmt_sets_panel2)) {
+    cat("- **Selected GMT Gene Sets:** ", paste(user_inputs$heatmap_gmt_sets_panel2, collapse = ", "), "\n")
+  } else if(user_inputs$heatmap_gene_group_mode_panel2 == "manual" && !is.null(user_inputs$selected_manual_genesets)) {
+    cat("- **Selected Manual Gene Sets:** ", paste(user_inputs$selected_manual_genesets, collapse = ", "), "\n")
+  }
+  cat("\n")
+  
+  cat("**Reproducible Code:**\n\n")
+  cat("```r\n")
+  cat("# Using the same setup as Panel 1:\n")
+  cat("# library(yourpackagename)\n")
+  cat("# lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
+  
+  if(user_inputs$heatmap_gene_group_mode_panel2 == "pathways") {
+    cat("# Load pathway data (included in package or lazy_data)\n")
+    cat("pathways <- lazy_data$pathways\n")
+    if("ALL" %in% user_inputs$heatmap_pathway_select_panel2) {
+      cat("gene_groups <- pathways  # All pathways selected\n")
+    } else {
+      cat("selected_pathways <- c(", paste(paste0("\"", user_inputs$heatmap_pathway_select_panel2, "\""), collapse = ", "), ")\n")
+      cat("gene_groups <- pathways[selected_pathways]\n")
+    }
+  } else if(user_inputs$heatmap_gene_group_mode_panel2 == "custom_gmt") {
+    cat("# Load GMT file (replace with your GMT file path)\n")
+    cat("gmt_data <- parse_gmt_file('path/to/your/geneset.gmt')\n")
+    if("ALL" %in% user_inputs$heatmap_gmt_sets_panel2) {
+      cat("gene_groups <- gmt_data  # All GMT gene sets selected\n")
+    } else {
+      cat("selected_gmt <- c(", paste(paste0("\"", user_inputs$heatmap_gmt_sets_panel2, "\""), collapse = ", "), ")\n")
+      cat("gene_groups <- gmt_data[selected_gmt]\n")
+    }
+  } else if(user_inputs$heatmap_gene_group_mode_panel2 == "manual") {
+    cat("# Manual gene sets (replace with your gene sets)\n")
+    cat("manual_genesets <- list(\n")
+    if(!is.null(user_inputs$selected_manual_genesets)) {
+      for(i in seq_along(user_inputs$selected_manual_genesets)) {
+        cat("  '", user_inputs$selected_manual_genesets[i], "' = c('GENE1', 'GENE2', 'GENE3')")
+        if(i < length(user_inputs$selected_manual_genesets)) cat(",")
+        cat("\n")
+      }
+    }
+    cat(")\n")
+    cat("gene_groups <- manual_genesets\n")
+  }
+  
+  cat("\n# Calculate gene set scores and create heatmap\n")
+  cat("heatmap_data <- calculate_geneset_scores(\n")
+  cat("  lazy_data = lazy_data,\n")
+  cat("  gene_groups = gene_groups,\n")
+  cat("  score_type = '", user_inputs$heatmap_score_panel2, "',\n")
+  cat("  cell_group_mode = '", user_inputs$heatmap_cell_group_mode_panel2, "',\n")
+  cat("  cluster_by = '", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "", user_inputs$heatmap_cluster_by_panel2), "'\n")
+  cat(")\n\n")
+  
+  cat("# Generate heatmap\n")
+  cat("heatmap_plot <- render_heatmap(heatmap_data, 'Panel 2: Gene Sets')\n")
+  cat("print(heatmap_plot)\n")
+  cat("```\n\n")
+  
+  cat("🔗 **Complete Package:** https://github.com/yourusername/yourrepo\n\n")
+}
+```
+
+```{r heatmap2-plot, eval=!is.null(saved_plots$heatmap2)}
 include_graphics(normalizePath(saved_plots$heatmap2))
 ```
 
-### Gene Expression Analysis
+```{r gene-section-header, eval=!is.null(saved_plots$gene_main), results='asis'}
+cat("### Gene Expression Analysis\n\n")
+```
 
-```{r gene-analysis, eval=!is.null(saved_plots$gene_main)}
+```{r gene-analysis-header, eval=!is.null(saved_plots$gene_main), results='asis'}
 cat("#### Main Gene Analysis Plot\n\n")
+```
+
+```{r gene-analysis-details, eval=!is.null(saved_plots$gene_main), results='asis'}
+# Add similar parameter display for gene analysis if you have the user_inputs values stored
+cat("**Plot Details:**\n\n")
+cat("This plot shows the main gene expression analysis results.\n\n")
+```
+
+```{r gene-analysis-plot, eval=!is.null(saved_plots$gene_main)}
 include_graphics(normalizePath(saved_plots$gene_main))
-cat("\n\nThis plot shows the main gene expression analysis results.\n")
 ```
 
-```{r no-gene-analysis, eval=is.null(saved_plots$gene_main), results='asis'}
-cat("No main gene analysis plot was generated in this session.\n")
+```{r qc-section-header, eval=!is.null(saved_plots$qc_main), results='asis'}
+cat("### Quality Control\n\n")
 ```
 
-### Quality Control
-
-```{r qc-analysis, eval=!is.null(saved_plots$qc_main)}
+```{r qc-analysis-header, eval=!is.null(saved_plots$qc_main), results='asis'}
 cat("#### Quality Control Plot\n\n")
+```
+
+```{r qc-analysis-details, eval=!is.null(saved_plots$qc_main), results='asis'}
+# Add similar parameter display for QC if you have the user_inputs values stored
+cat("**Plot Details:**\n\n")
+cat("This plot displays the quality control metrics for the analysis.\n\n")
+```
+
+```{r qc-analysis-plot, eval=!is.null(saved_plots$qc_main)}
 include_graphics(normalizePath(saved_plots$qc_main))
-cat("\n\nThis plot displays the quality control metrics for the analysis.\n")
 ```
 
-```{r no-qc-analysis, eval=is.null(saved_plots$qc_main), results='asis'}
-cat("No quality control plot was generated in this session.\n")
+```{r canvas-section-header, results='asis'}
+# Check if any canvas plots exist
+canvas_plots <- saved_plots[grepl("canvas", names(saved_plots))]
+if(length(canvas_plots) > 0) {
+  cat("## Interactive Canvas Elements\n\n")
+}
 ```
 
-## Interactive Canvas Elements
-
-### Scatterplot Canvas
-
-```{r scatterplot-info, eval=!is.null(saved_plots$scatterplot_canvas), results='asis'}
+```{r scatterplot-canvas-header, eval=!is.null(saved_plots$scatterplot_canvas), results='asis'}
+cat("### Scatterplot Canvas\n\n")
 cat("#### Scatterplot Canvas\n\n")
+```
+
+```{r scatterplot-canvas-plot, eval=!is.null(saved_plots$scatterplot_canvas)}
 include_graphics(normalizePath(saved_plots$scatterplot_canvas))
+```
+
+```{r scatterplot-canvas-text, eval=!is.null(saved_plots$scatterplot_canvas), results='asis'}
 cat("\n\nThis image represents a static snapshot of the interactive scatterplot canvas generated in the application.\n")
 ```
 
-```{r no-scatterplot, eval=is.null(saved_plots$scatterplot_canvas), results='asis'}
-cat("No scatterplot canvas was generated in this session.\n\n")
+```{r gene-canvas-header, results='asis'}
+gene_canvases <- saved_plots[grepl("^gene_canvas_", names(saved_plots))]
+if(length(gene_canvases) > 0) {
+  cat("### Gene-Specific Canvas Plots\n\n")
+  cat("The following static images represent snapshots of the interactive gene-specific canvas plots generated in the application:\n\n")
+}
 ```
 
-### Gene-Specific Canvas Plots
-
-```{r gene-canvas-info, results='asis'}
-# Filter for gene canvas plots
+```{r gene-canvas-plots, results='asis'}
 gene_canvases <- saved_plots[grepl("^gene_canvas_", names(saved_plots))]
-
 if(length(gene_canvases) > 0) {
-  cat("#### Gene-Specific Canvas Plots\n\n")
-  cat("The following static images represent snapshots of the interactive gene-specific canvas plots generated in the application:\n\n")
-  
   for(canvas_name in names(gene_canvases)) {
     gene_name <- gsub("gene_canvas_", "", canvas_name)
-    cat(sprintf("##### %s\n\n", gene_name))
-    cat(sprintf("![](%s)\n\n", normalizePath(gene_canvases[[canvas_name]])))
+    cat(sprintf("#### %s\n\n", gene_name))
+    
+    # Create a temporary variable for the current plot path
+    current_plot <- gene_canvases[[canvas_name]]
+    
+    # Output the image using markdown syntax within asis
+    cat(sprintf("![](%s)\n\n", normalizePath(current_plot)))
+    
     cat(sprintf("This image represents a static snapshot of the interactive canvas for gene %s.\n\n", gene_name))
   }
-} else {
-  cat("No gene-specific canvas plots were generated in this session.\n\n")
 }
 ```
 
