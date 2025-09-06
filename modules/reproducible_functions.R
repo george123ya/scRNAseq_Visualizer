@@ -37,6 +37,8 @@ zarr   <- reticulate::import("zarr", delay_load = TRUE)
 fsspec <- reticulate::import("fsspec", delay_load = TRUE)
 pd     <- reticulate::import("pandas", delay_load = TRUE)
 np     <- reticulate::import("numpy", delay_load = TRUE)
+scipy  <- reticulate::import("scipy", delay_load = TRUE)
+csc_matrix <- reticulate::import("scipy.sparse", delay_load = TRUE)$csc_matrix
 
 reticulate::py_run_string("
 import zarr
