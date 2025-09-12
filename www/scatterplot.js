@@ -225,68 +225,107 @@ let currentLegendData = new Map(); // Track current legend data to avoid unneces
 // Add these helper functions first (if not already added)
 let customColors = new Map(); // Add to globals if not already there
 
+// Utility function to convert RGB to HEX
 function rgbToHex(rgb) {
-  if (rgb.startsWith('#')) return rgb;
-  const result = rgb.match(/\d+/g);
-  if (!result || result.length < 3) return rgb;
-  const r = parseInt(result[0]);
-  const g = parseInt(result[1]);
-  const b = parseInt(result[2]);
-  return '#' + [r, g, b].map(x => {
-    const hex = x.toString(16);
-    return hex.length === 1 ? '0' + hex : hex;
-  }).join('');
+  if (rgb.startsWith('#')) return rgb.toUpperCase();
+  const match = rgb.match(/\d+/g);
+  if (!match) return '#000000';
+  const [r, g, b] = match.map(Number);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1).toUpperCase()}`;
 }
 
-function createInlineColorPicker(initialColor, onColorChange, onClose) {
-  const picker = document.createElement('input');
-  picker.type = 'color';
-  picker.value = initialColor;
-  picker.style.cssText = `
+// Pickr-based color picker
+async function createInlineColorPicker(initialColor, onColorChange, onClose, colorBoxContainer) {
+  // Dynamically import Pickr
+  let Pickr;
+  try {
+    const pickrModule = await import('https://esm.sh/@simonwep/pickr@1.9.0');
+    Pickr = pickrModule.default;
+  } catch (error) {
+    console.error('Failed to load Pickr:', error);
+    return null; // Fallback to prevent breaking the app
+  }
+
+  // Load Pickr CSS dynamically (only once)
+  if (!document.querySelector('link[href*="pickr"]')) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://esm.sh/@simonwep/pickr@1.9.0/dist/themes/nano.min.css';
+    document.head.appendChild(link);
+  }
+
+  // Create container for the color picker
+  const container = document.createElement('div');
+  container.style.cssText = `
     width: 100%;
     height: 100%;
-    border: none;
     border-radius: 2px;
-    cursor: pointer;
-    padding: 0;
-    margin: 0;
   `;
-  
-  // Live updates as user drags
-  picker.addEventListener('input', (e) => {
-    onColorChange(e.target.value, false); // false = not final
+
+  // Append container to colorBoxContainer (already in DOM) before Pickr initialization
+  colorBoxContainer.innerHTML = '';
+  colorBoxContainer.appendChild(container);
+
+  // Initialize Pickr
+  const pickr = Pickr.create({
+    el: container,
+    theme: 'nano',
+    default: initialColor,
+    swatches: null,
+    components: {
+      preview: true,
+      opacity: false,
+      hue: true,
+      interaction: {
+        hex: true,
+        rgba: false,
+        input: true,
+        save: true,
+        clear: true
+      }
+    },
+    defaultRepresentation: 'HEX',
+    position: 'bottom-middle' // Ensure popup stays in view
   });
-  
-  // Final update when user is done
-  picker.addEventListener('change', (e) => {
-    onColorChange(e.target.value, true); // true = final
+
+  // Live color changes
+  pickr.on('change', (color) => {
+    const hex = color.toHEXA().toString().toUpperCase();
+    onColorChange(hex, false);
   });
-  
-  // Close on blur or escape
-  picker.addEventListener('blur', () => {
+
+  // Final color selection
+  pickr.on('save', (color) => {
+    const hex = color ? color.toHEXA().toString().toUpperCase() : initialColor;
+    onColorChange(hex, true);
+    pickr.hide();
+  });
+
+  // Picker close
+  pickr.on('hide', () => {
     onClose();
   });
-  
-  picker.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      onClose();
-    }
-  });
-  
-  return picker;
+
+  // Open the picker immediately
+  pickr.show();
+
+  return container;
 }
 
+// Rewritten createPlotLegend function
 function createPlotLegend(plotId, legendData, type = 'categorical') {
+  // Generate unique legend key
   const legendKey = `${plotId}_${type}`;
   const existingData = currentLegendData.get(legendKey);
-  
+
+  // Handle visibility updates for existing categorical legend
   if (isUpdatingVisibility && type === 'categorical' && existingData) {
     const container = document.getElementById(plotId === 'main' ? 'scatterplot_canvas' : `gene_canvas_${plotId}`);
     if (!container) return;
-    
+
     const plotContainer = container.parentElement;
     if (!plotContainer) return;
-    
+
     const legend = plotContainer.querySelector('.plot-legend');
     if (legend) {
       const itemsContainer = legend.children[1];
@@ -299,8 +338,10 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
     }
   }
 
+  // Store legend data
   currentLegendData.set(legendKey, legendData);
 
+  // Get plot container
   const container = document.getElementById(plotId === 'main' ? 'scatterplot_canvas' : `gene_canvas_${plotId}`);
   if (!container) return;
 
@@ -311,13 +352,13 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
   const existingLegend = plotContainer.querySelector('.plot-legend');
   if (existingLegend) existingLegend.remove();
 
+  // Ensure plot container is positioned
   plotContainer.style.position = 'relative';
 
-  // Create draggable legend container
+  // Create legend container
   const legendContainer = document.createElement('div');
   legendContainer.className = 'plot-legend';
   const legendId = `legend_${plotId}_${type}`;
-  
   legendContainer.style.cssText = `
     position: absolute;
     top: 8px;
@@ -336,8 +377,8 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
   `;
 
   if (type === 'gene') {
+    // Gene legend (gradient-based)
     const { minVal, maxVal, midVal, realMin, realMax, geneName } = legendData;
-    
     const contentContainer = document.createElement('div');
     contentContainer.style.cssText = 'padding: 6px;';
     contentContainer.innerHTML = `
@@ -346,7 +387,8 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
       </div>
       <div style="display: flex; justify-content: center; align-items: center;">
         <div style="
-          width: 20px; height: 80px;
+          width: 20px;
+          height: 80px;
           background: linear-gradient(to top, 
             ${viridisColors[0]}, 
             ${viridisColors[Math.floor(viridisColors.length/2)]}, 
@@ -369,24 +411,23 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         </div>
       </div>
       <div style="
-        font-size: 9px; 
-        text-align: center; 
-        margin-top: 4px; 
+        font-size: 9px;
+        text-align: center;
+        margin-top: 4px;
         color: #666;">
         Data range: ${realMin} – ${realMax}
       </div>
     `;
-    
     legendContainer.appendChild(contentContainer);
-    
   } else {
+    // Categorical legend
     const { names, colors, visible, annotationName } = legendData;
 
     // Title
     const titleDiv = document.createElement('div');
     titleDiv.style.cssText = `
       font-weight: bold;
-      margin: 6px 6px 6px 6px;
+      margin: 6px;
       text-align: center;
       border-bottom: 1px solid #eee;
       padding-bottom: 4px;
@@ -394,7 +435,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
     titleDiv.textContent = annotationName.replace(/_/g, ' ');
     legendContainer.appendChild(titleDiv);
 
-    // Scrollable items container
+    // Items container
     const itemsContainer = document.createElement('div');
     itemsContainer.style.cssText = `
       max-height: 150px;
@@ -415,7 +456,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         transition: opacity 0.2s;
       `;
 
-      // Create color box container
+      // Color box container
       const colorBoxContainer = document.createElement('div');
       colorBoxContainer.style.cssText = `
         flex: 0 0 12px;
@@ -426,7 +467,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         overflow: hidden;
       `;
 
-      // Create the actual color display
+      // Color box
       const colorBox = document.createElement('div');
       const customColor = customColors.get(`${annotationName}_${i}`) || colors[i];
       colorBox.style.cssText = `
@@ -440,14 +481,13 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         box-sizing: border-box;
       `;
 
-      // Add hover effects to color box
+      // Hover effects
       colorBox.addEventListener('mouseenter', () => {
         if (!colorBox.dataset.editing) {
           colorBox.style.transform = 'scale(1.1)';
           colorBox.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
         }
       });
-
       colorBox.addEventListener('mouseleave', () => {
         if (!colorBox.dataset.editing) {
           colorBox.style.transform = 'scale(1)';
@@ -455,81 +495,66 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         }
       });
 
-      let originalColor = customColor; // Store original for potential cancellation
-
-      // Add color picker click handler to color box
-      colorBox.addEventListener('click', (e) => {
+      // Color picker handler
+      let originalColor = rgbToHex(customColor);
+      colorBox.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        
-        if (colorBox.dataset.editing === 'true') return; // Already editing
-        
+
+        if (colorBox.dataset.editing === 'true') return;
         colorBox.dataset.editing = 'true';
         originalColor = rgbToHex(colorBox.style.backgroundColor || customColor);
-        
-        // Create inline color picker
-        const colorPicker = createInlineColorPicker(
-          originalColor,
-          (newColor, isFinal) => {
-            // Update visual immediately (live updates)
-            colorBox.style.backgroundColor = newColor;
-            
-            if (isFinal) {
-              // Store custom color permanently
-              customColors.set(`${annotationName}_${i}`, newColor);
-              
-              // Update annotation colors array
-              if (mainAnnotation && mainAnnotation.colors) {
-                mainAnnotation.colors[i] = newColor;
+
+        try {
+          const colorPicker = await createInlineColorPicker(
+            originalColor,
+            (newColor, isFinal) => {
+              colorBox.style.backgroundColor = newColor;
+
+              if (isFinal) {
+                customColors.set(`${annotationName}_${i}`, newColor);
+                if (mainAnnotation && mainAnnotation.colors) {
+                  mainAnnotation.colors[i] = newColor;
+                }
+                Shiny.setInputValue('colorChange', {
+                  annotation: annotationName,
+                  categoryIndex: i,
+                  categoryName: name,
+                  newColor: newColor,
+                  allColors: mainAnnotation ? mainAnnotation.colors : colors,
+                  timestamp: Date.now()
+                }, { priority: 'event' });
+              } else {
+                if (mainAnnotation && mainAnnotation.colors) {
+                  mainAnnotation.colors[i] = newColor;
+                }
               }
-              
-              // Send to Shiny backend
-              Shiny.setInputValue('colorChange', {
-                annotation: annotationName,
-                categoryIndex: i,
-                categoryName: name,
-                newColor: newColor,
-                allColors: mainAnnotation ? mainAnnotation.colors : colors,
-                timestamp: Date.now()
-              }, { priority: 'event' });
-            } else {
-              // Live update - just update visuals, don't persist yet
-              // Update annotation colors for live preview
-              if (mainAnnotation && mainAnnotation.colors) {
-                mainAnnotation.colors[i] = newColor;
+
+              if (scatterplot && mainAnnotation && mainAnnotation.colorBy === annotationName) {
+                scatterplot.set({ pointColor: mainAnnotation.colors });
+                scatterplot.draw(filteredPoints, { transition: false });
               }
-            }
-            
-            // Redraw plots with new color (both live and final)
-            if (scatterplot && mainAnnotation && mainAnnotation.colorBy === annotationName) {
-              scatterplot.set({ pointColor: mainAnnotation.colors });
-              scatterplot.draw(filteredPoints, { transition: false });
-            }
-          },
-          () => {
-            // On close/cancel
+            },
+            () => {
+              colorBox.dataset.editing = 'false';
+              colorBoxContainer.innerHTML = '';
+              colorBoxContainer.appendChild(colorBox);
+              colorBox.style.transform = 'scale(1)';
+              colorBox.style.boxShadow = 'none';
+            },
+            colorBoxContainer // Pass colorBoxContainer to append directly
+          );
+
+          if (!colorPicker) {
             colorBox.dataset.editing = 'false';
-            colorBoxContainer.innerHTML = '';
-            colorBoxContainer.appendChild(colorBox);
-            
-            // Reset styles
-            colorBox.style.transform = 'scale(1)';
-            colorBox.style.boxShadow = 'none';
           }
-        );
-        
-        // Replace color box with picker temporarily
-        colorBoxContainer.innerHTML = '';
-        colorBoxContainer.appendChild(colorPicker);
-        
-        // Focus the picker and open it
-        setTimeout(() => {
-          colorPicker.focus();
-          colorPicker.click(); // This opens the color picker dialog
-        }, 10);
+        } catch (error) {
+          console.error('Failed to create color picker:', error);
+          colorBox.dataset.editing = 'false';
+        }
       });
 
-      // Create text span for visibility toggle
+      // Text span for visibility toggle
       const textSpan = document.createElement('span');
       textSpan.style.cssText = `
         font-size: 10px;
@@ -542,11 +567,11 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
       `;
       textSpan.textContent = name;
 
-      // Add your existing visibility toggle click handler to text span
+      // Visibility toggle handler
       textSpan.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        
+
         const scrollTop = itemsContainer.scrollTop;
         const currentlyVisible = Array.from(visible);
         isUpdatingVisibility = true;
@@ -554,7 +579,6 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         if (e.shiftKey && lastClicked !== null) {
           const start = Math.min(lastClicked, i);
           const end = Math.max(lastClicked, i);
-
           if (e.ctrlKey || e.metaKey) {
             for (let idx = start; idx <= end; idx++) {
               visible.add(idx);
@@ -588,11 +612,9 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         }
 
         lastClicked = i;
-
         itemsContainer.querySelectorAll('.legend-item').forEach((el, idx) => {
           el.style.opacity = visible.has(idx) ? '1' : '0.4';
         });
-
         itemsContainer.scrollTop = scrollTop;
 
         redrawAllPlots(mainAnnotation).finally(() => {
@@ -603,7 +625,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         });
       });
 
-      // Append elements to item
+      // Assemble legend item
       colorBoxContainer.appendChild(colorBox);
       item.appendChild(colorBoxContainer);
       item.appendChild(textSpan);
@@ -613,9 +635,8 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
     legendContainer.appendChild(itemsContainer);
   }
 
+  // Append and make draggable/resizable
   plotContainer.appendChild(legendContainer);
-
-  // Make it draggable and resizable
   makeLegendDraggableAndResizable(legendContainer, legendId);
 }
 
@@ -2535,34 +2556,121 @@ initScatterplot();
 Shiny.addCustomMessageHandler('captureCanvases', function(message) {
   console.log("Received captureCanvases message:", message);
   console.log("Starting canvas capture...");
-  const canvases = document.querySelectorAll('canvas[id^="scatterplot_canvas"], canvas[id^="gene_canvas_"]');
-  console.log("Found", canvases.length, "canvases");
   
-  const canvasData = {};
-  canvases.forEach(canvas => {
-    console.log("Capturing canvas:", canvas.id);
-    const ctx = canvas.getContext('webgl') || canvas.getContext('2d');
-    const pixel = ctx.getImageData(0, 0, 1, 1).data;
-    console.log("Canvas pixel check (top-left):", pixel);
+  // Add small delay to ensure all DOM elements are ready
+  setTimeout(() => {
+    const canvases = document.querySelectorAll('canvas[id^="scatterplot_canvas"], canvas[id^="gene_canvas_"]');
+    console.log("Found", canvases.length, "canvases");
 
-    // Create an offscreen canvas with same dimensions
-    const offscreen = document.createElement('canvas');
-    offscreen.width = canvas.width;
-    offscreen.height = canvas.height;
-    const offctx = offscreen.getContext('2d');
+    const canvasData = {};
 
-    // Fill with white background
-    offctx.fillStyle = '#FFFFFF';
-    offctx.fillRect(0, 0, offscreen.width, offscreen.height);
+    // Ensure html2canvas is loaded
+    if (typeof html2canvas === 'undefined') {
+      console.error("html2canvas is not loaded. Please include the library.");
+      Shiny.setInputValue('canvas_data', canvasData, { priority: 'event' });
+      return;
+    }
 
-    // Draw original canvas on top
-    offctx.drawImage(canvas, 0, 0);
+    if (canvases.length === 0) {
+      console.warn("No canvases found to capture");
+      Shiny.setInputValue('canvas_data', canvasData, { priority: 'event' });
+      return;
+    }
 
-    // Export as JPEG with white background
-    const dataURL = offscreen.toDataURL('image/jpeg', 0.8);
-    canvasData[canvas.id] = dataURL;
-  });
+    // Process canvases sequentially to avoid rendering issues
+    const capturePromises = Array.from(canvases).map((canvas, index) => {
+      return new Promise(resolve => {
+        // Add small delay between captures to prevent conflicts
+        setTimeout(() => {
+          console.log("Capturing canvas:", canvas.id, `(${index + 1}/${canvases.length})`);
+          
+          // Get the plot container (parent of canvas, which includes the legend)
+          const plotContainer = canvas.parentElement;
+          if (!plotContainer) {
+            console.error("No plot container found for canvas:", canvas.id);
+            resolve();
+            return;
+          }
 
-  console.log("Sending canvas data to Shiny:", Object.keys(canvasData));
-  Shiny.setInputValue('canvas_data', canvasData, { priority: 'event' });
+          // Ensure the canvas is visible and has content
+          if (canvas.width === 0 || canvas.height === 0) {
+            console.warn("Canvas has zero dimensions:", canvas.id);
+            resolve();
+            return;
+          }
+
+          // Use html2canvas to capture the entire plot container (canvas + legend)
+          html2canvas(plotContainer, {
+            backgroundColor: '#FFFFFF', // Ensure white background
+            scale: 2, // Increase resolution for better quality
+            logging: false, // Disable for production
+            useCORS: true,
+            allowTaint: true,
+            width: plotContainer.offsetWidth,
+            height: plotContainer.offsetHeight,
+            scrollX: 0,
+            scrollY: 0
+          }).then(offscreenCanvas => {
+            // Verify the captured canvas has content
+            if (offscreenCanvas.width === 0 || offscreenCanvas.height === 0) {
+              console.error("Captured canvas has zero dimensions:", canvas.id);
+              resolve();
+              return;
+            }
+            
+            // Export as JPEG
+            const dataURL = offscreenCanvas.toDataURL('image/jpeg', 0.8);
+            canvasData[canvas.id] = dataURL;
+            console.log("Captured canvas with legend:", canvas.id, 
+                       `(${offscreenCanvas.width}x${offscreenCanvas.height})`);
+            resolve();
+          }).catch(error => {
+            console.error("Error capturing canvas:", canvas.id, error);
+            // Fallback to capturing only the canvas
+            try {
+              const offscreen = document.createElement('canvas');
+              offscreen.width = canvas.width;
+              offscreen.height = canvas.height;
+              const offctx = offscreen.getContext('2d');
+              offctx.fillStyle = '#FFFFFF';
+              offctx.fillRect(0, 0, offscreen.width, offscreen.height);
+              offctx.drawImage(canvas, 0, 0);
+              const dataURL = offscreen.toDataURL('image/jpeg', 0.8);
+              canvasData[canvas.id] = dataURL;
+              console.log("Fallback: Captured canvas without legend:", canvas.id);
+            } catch (fallbackError) {
+              console.error("Fallback capture also failed:", canvas.id, fallbackError);
+            }
+            resolve();
+          });
+        }, index * 100); // Stagger captures by 100ms each
+      });
+    });
+
+    // Wait for all captures to complete
+    Promise.all(capturePromises).then(() => {
+      console.log("Sending canvas data to Shiny:", Object.keys(canvasData));
+      console.log("Total canvases captured:", Object.keys(canvasData).length);
+      
+      // Always send with unique timestamp to force Shiny to detect changes
+      const uniqueData = {
+        ...canvasData,
+        timestamp: Date.now(),
+        capture_id: Math.random().toString(36).substr(2, 9) // Additional uniqueness
+      };
+      
+      Shiny.setInputValue('canvas_data', uniqueData, { priority: 'event' });
+    }).catch(error => {
+      console.error("Error in Promise.all:", error);
+      // Still send data even if there are errors, with unique identifier
+      const uniqueData = {
+        ...canvasData,
+        timestamp: Date.now(),
+        capture_id: Math.random().toString(36).substr(2, 9),
+        error: true
+      };
+      Shiny.setInputValue('canvas_data', uniqueData, { priority: 'event' });
+    });
+    
+  }, 100); // Initial delay of 100ms
 });

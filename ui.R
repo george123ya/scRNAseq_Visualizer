@@ -21,6 +21,9 @@ ui <- fluidPage(
   # Custom CSS styling
   tags$head(
     tags$script(src = "scatterplot.js"),
+    tags$script(src = "qc_plots.js"),
+    tags$script(src = "https://d3js.org/d3.v7.min.js"),
+    tags$script(src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'),
     tags$link(rel = "stylesheet", type = "text/css", href = "styles.css"),
     tags$style(HTML("
       .nav-tabs .nav-link.active {
@@ -35,12 +38,25 @@ ui <- fluidPage(
         padding: 15px;
         margin-bottom: 15px;
       }
+      .filter-row {
+        margin-bottom: 15px;
+      }
+      
+      .filter-label {
+        margin-bottom: 8px;
+        font-size: 14px;
+        color: #495057;
+      }
+      
+      .filter-preview {
+        border-left: 3px solid #007bff;
+      }
       .qc-plot-container {
-        background: white;
+        margin-bottom: 20px;
+        padding: 15px;
         border: 1px solid #dee2e6;
         border-radius: 8px;
-        padding: 15px;
-        margin-bottom: 15px;
+        background-color: #ffffff;
       }
       .metric-value {
         font-size: 24px;
@@ -103,6 +119,12 @@ ui <- fluidPage(
             font-size: 14px;
             font-weight: 500;
         }
+
+        .gene-plots {
+          max-height: 600px;  /* Adjust as needed */
+          overflow-y: auto;   /* Enable vertical scrolling */
+          padding: 10px;
+        }
     "))
   ),
   
@@ -129,9 +151,9 @@ ui <- fluidPage(
           tags$small(class = "text-muted", 
             "Select your .h5ad file or use demo data for exploration")
         ),
-        actionButton("test_capture", "Prepare Download"),
-        downloadButton("download_report", "Download Full Report")
-        # uiOutput("download_button_ui")
+        # actionButton("test_capture", "Prepare Download"),
+        # downloadButton("download_report", "Download Full Report")
+        uiOutput("download_button_ui")
 
       ),
       
@@ -199,7 +221,8 @@ ui <- fluidPage(
             conditionalPanel(
               condition = "input.qc_plot_type != 'scatter'",
               uiOutput("gene_selected_ui"),
-              uiOutput("gene_group_by_ui")
+              uiOutput("gene_group_by_ui"),  # Add the Group by selector
+              actionButton("update_plots", "Update Plots"),  # Add button
             ),
             
             # Plot type selection
@@ -213,7 +236,7 @@ ui <- fluidPage(
             ),
 
             checkboxInput("gene_show_points", "Show individual points", value = TRUE),
-            checkboxInput("gene_log_scale", "Log scale (where applicable)", value = FALSE),
+            checkboxInput("gene_log_scale", "Log scale y-axis", value = FALSE),
             sliderInput("gene_point_size", "Point size:", 
               min = 0.1, max = 2, value = 0.5, step = 0.1)
           )
@@ -405,8 +428,8 @@ ui <- fluidPage(
             radioButtons("qc_plot_type", "Plot Type:",
               choices = list(
                 "Violin Plot" = "violin",
-                "Box Plot" = "box",
-                "Histogram" = "histogram",
+                # "Box Plot" = "box",
+                # "Histogram" = "histogram",
                 "Scatter Plot" = "scatter"
               ),
               selected = "violin",
@@ -416,7 +439,10 @@ ui <- fluidPage(
             checkboxInput("qc_show_points", "Show individual points", value = TRUE),
             checkboxInput("qc_log_scale", "Log scale (where applicable)", value = FALSE),
             sliderInput("qc_point_size", "Point size:", 
-              min = 0.1, max = 2, value = 0.5, step = 0.1)
+            min = 0.1, max = 2, value = 0.5, step = 0.1),
+            radioButtons("qc_legend_position", "Label Position:",
+               choices = c("Legend" = "Legend", "Bottom Labels" = "Bottom Labels"),
+               selected = "Legend")  
           )
         )
       ),
@@ -529,13 +555,12 @@ ui <- fluidPage(
         # Gene Expression Tab
         tabPanel("🎻 Violin Plot", value = "violin_plot_genes",
           div(style = "margin-top: 20px;",
-            h3("📈 Gene Expression"),
+            # h3("📈 Gene Expression"),
             fluidRow(
-              # Main plots
               column(8,
                 div(class = "gene-plots",
                   h4("Expression Distribution"),
-                  plotOutput("gene_main_plot", height = "400px"),
+                  uiOutput("gene_plots_ui")      # Dynamic plot outputs
                 )
               )
             )
@@ -543,7 +568,7 @@ ui <- fluidPage(
         ),
         tabPanel("🗺️ Heatmap", value = "heatmap_genes",
           div(style = "margin-top: 20px;",
-            h3("📈 Gene Expression Heatmaps"),
+            # h3("📈 Gene Expression Heatmaps"),
 
             # First heatmap
             div(class = "gene-plots",
@@ -570,27 +595,138 @@ ui <- fluidPage(
               column(8,
                 div(class = "qc-plot-container",
                   h4("QC Metrics Distribution"),
-                  plotOutput("qc_main_plot", height = "400px")
+                  # plotOutput("qc_main_plot", height = "400px")
+                  uiOutput("qc_main_plot")
                 )
               ),
               
-              # QC Statistics
+              # Enhanced filtering UI section
               column(4,
                 div(class = "qc-plot-container",
                   h4("QC Statistics"),
                   tableOutput("qc_stats_table")
                 ),
+                
+                # Interactive Filters Section
                 div(class = "qc-plot-container",
-                  h4("Filtering Preview"),
-                  textOutput("filter_preview"),
-                  br(),
-                  div(style = "font-size: 12px; color: #6c757d;",
-                    "Cells passing current filters"
+                  h4("Interactive Filters"),
+                  
+                  # Mitochondrial Percentage Filter
+                  div(class = "filter-row",
+                    div(class = "filter-label", 
+                      tags$strong("Mitochondrial %")
+                    ),
+                    fluidRow(
+                      column(6,
+                        selectInput("mito_var_select", 
+                                  label = NULL,
+                                  choices = c("Choose variable" = ""),
+                                  selected = "",
+                                  width = "100%")
+                      ),
+                      column(3,
+                        numericInput("mito_min", 
+                                    label = NULL,
+                                    value = 0,
+                                    min = 0,
+                                    max = 100,
+                                    step = 0.1,
+                                    width = "100%")
+                      ),
+                      column(3,
+                        numericInput("mito_max", 
+                                    label = NULL,
+                                    value = 5,
+                                    min = 0,
+                                    max = 100,
+                                    step = 0.1,
+                                    width = "100%")
+                      )
+                    )
+                  ),
+                  
+                  tags$hr(style = "margin: 10px 0; border-color: #e9ecef;"),
+                  
+                  # Total Counts Filter
+                  div(class = "filter-row",
+                    div(class = "filter-label", 
+                      tags$strong("Total Counts")
+                    ),
+                    fluidRow(
+                      column(6,
+                        selectInput("counts_var_select", 
+                                  label = NULL,
+                                  choices = c("Choose variable" = ""),
+                                  selected = "",
+                                  width = "100%")
+                      ),
+                      column(3,
+                        numericInput("counts_min", 
+                                    label = NULL,
+                                    value = 1000,
+                                    min = 0,
+                                    step = 100,
+                                    width = "100%")
+                      ),
+                      column(3,
+                        numericInput("counts_max", 
+                                    label = NULL,
+                                    value = NA,
+                                    min = 0,
+                                    step = 100,
+                                    width = "100%")
+                      )
+                    )
+                  ),
+                  
+                  tags$hr(style = "margin: 10px 0; border-color: #e9ecef;"),
+                  
+                  # Number of Genes Filter
+                  div(class = "filter-row",
+                    div(class = "filter-label", 
+                      tags$strong("Number of Genes")
+                    ),
+                    fluidRow(
+                      column(6,
+                        selectInput("genes_var_select", 
+                                  label = NULL,
+                                  choices = c("Choose variable" = ""),
+                                  selected = "",
+                                  width = "100%")
+                      ),
+                      column(3,
+                        numericInput("genes_min", 
+                                    label = NULL,
+                                    value = 200,
+                                    min = 0,
+                                    step = 50,
+                                    width = "100%")
+                      ),
+                      column(3,
+                        numericInput("genes_max", 
+                                    label = NULL,
+                                    value = NA,
+                                    min = 0,
+                                    step = 50,
+                                    width = "100%")
+                      )
+                    )
+                  ),
+                  
+                  # Filter Preview
+                  div(class = "filter-preview",
+                    style = "margin-top: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 5px;",
+                    h5("Filter Preview", style = "margin-bottom: 10px; color: #495057;"),
+                    textOutput("filter_preview_enhanced"),
+                    br(),
+                    div(style = "font-size: 12px; color: #6c757d;",
+                      "Cells passing current filters"
+                    )
                   )
                 )
               )
             ),
-            
+              
             # Detailed Tables Row
             fluidRow(
               column(12,

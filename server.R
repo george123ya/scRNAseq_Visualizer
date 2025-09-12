@@ -1998,6 +1998,7 @@ server <- function(input, output, session) {
   })
 
 
+  # Initialize reactive value for manual gene sets
   manual_genesets <- reactiveVal(list())
 
   # Add manual gene set
@@ -2006,6 +2007,7 @@ server <- function(input, output, session) {
     
     name <- trimws(input$manual_geneset_name)
     genes <- toupper(trimws(unlist(strsplit(input$manual_geneset_genes, ",|\\s+"))))
+    genes <- genes[genes != ""]
     
     if (name != "" && length(genes) > 0) {
       current_sets <- manual_genesets()
@@ -2016,10 +2018,10 @@ server <- function(input, output, session) {
       updateTextInput(session, "manual_geneset_name", value = "")
       updateTextInput(session, "manual_geneset_genes", value = "")
       
-      # Update selectize choices
+      # Update selectize choices and select all gene sets
       updateSelectizeInput(session, "selected_manual_genesets", 
                           choices = names(current_sets),
-                          selected = input$selected_manual_genesets)
+                          selected = names(current_sets)) # Select all gene sets
     }
   })
 
@@ -2055,10 +2057,10 @@ server <- function(input, output, session) {
     current_sets[[input$remove_manual_geneset]] <- NULL
     manual_genesets(current_sets)
     
-    # Update selectize choices
+    # Update selectize choices and select all remaining gene sets
     updateSelectizeInput(session, "selected_manual_genesets", 
                         choices = names(current_sets),
-                        selected = setdiff(input$selected_manual_genesets, input$remove_manual_geneset))
+                        selected = names(current_sets)) # Select all remaining gene sets
   })
 
   # Check if manual gene sets exist
@@ -2067,6 +2069,13 @@ server <- function(input, output, session) {
   })
   outputOptions(output, "has_manual_genesets", suspendWhenHidden = FALSE)
 
+  # Ensure all gene sets are selected whenever manual_genesets changes
+  observe({
+    current_sets <- manual_genesets()
+    updateSelectizeInput(session, "selected_manual_genesets",
+                        choices = names(current_sets),
+                        selected = names(current_sets)) # Select all gene sets
+  })
   # UI select for clustering (with alphabetical ordering)
   output$heatmap_cluster_by_ui_panel1 <- renderUI({
     req(values$lazy_data$obs_keys)
@@ -2439,7 +2448,7 @@ server <- function(input, output, session) {
     req(heatmap_data_panel1())
     library(ComplexHeatmap)
     data <- heatmap_data_panel1()
-    p <- render_heatmap(data, "Panel 1: Individual Genes")
+    p <- render_heatmap(data, "")
     plot_storage$heatmap1 <- p
     p
   })
@@ -2454,7 +2463,7 @@ server <- function(input, output, session) {
     req(heatmap_data_panel2())
     library(ComplexHeatmap)
     data <- heatmap_data_panel2()
-    p <- render_heatmap(data, "Panel 2: Gene Sets")
+    p <- render_heatmap(data, "")
     plot_storage$heatmap2 <- p
     p
   })
@@ -2604,175 +2613,292 @@ server <- function(input, output, session) {
     )
   }) %>% bindEvent(list(values$lazy_data, input$geneSearch_tab_initialized), ignoreNULL = TRUE, ignoreInit = FALSE)
 
+  # Initialize reactiveValues for caching gene-specific data and displayed genes
+  gene_data_cache <- reactiveValues(data = list())
+  displayed_genes <- reactiveValues(genes = character(0))  # Track genes to display in UI
 
-  # Group by
+  # Group by UI (unchanged)
   output$gene_group_by_ui <- renderUI({
+    choices <- categorical_vars()
+    if (length(choices) == 0) {
+      return(p("No categorical variables available for grouping."))
+    }
     selectInput("gene_group_by", "Group by:",
-      choices = categorical_vars(),
-      selected = categorical_vars()[1]
-    )
+                choices = choices,
+                selected = choices[1])
   })
 
-  # Reactive to prepare data for plotting
-  gene_expression_data <- reactive({
+  # Update displayed genes when button is clicked
+  observeEvent(input$update_plots, {
     req(input$geneSearch_tab)
+    displayed_genes$genes <- input$geneSearch_tab  # Update genes to display
+  })
+
+  # Reactive data triggered by button
+  gene_expression_data <- eventReactive(input$update_plots, {
+    req(input$geneSearch_tab, input$gene_group_by)
     genes <- input$geneSearch_tab
 
-    # Get expression per cell for all selected genes
-    expr_list <- lapply(genes, function(g) {
-      values$lazy_data$get_gene_expression(gene_name = g)
-    })
-    mat <- do.call(cbind, expr_list)
-    colnames(mat) <- genes
+    # Update cache for new or changed genes
+    for (gene in genes) {
+      if (is.null(gene_data_cache$data[[gene]]) || 
+          !identical(input$gene_group_by, gene_data_cache$data[[gene]]$group_by)) {
+        # Get expression for this gene
+        expr <- values$lazy_data$get_gene_expression(gene_name = gene)
+        
+        # Get grouping variable
+        group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$gene_group_by)
+        req(group_var)
+        group_var <- as.factor(group_var)
+        
+        # Build long-format data frame for this gene
+        df <- data.frame(group = group_var, expression = expr, gene = gene)
+        
+        # Cache the data
+        gene_data_cache$data[[gene]] <- list(
+          data = df,
+          group_by = input$gene_group_by
+        )
+      }
+    }
     
-    # Get grouping variable and force categorical
-    group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$gene_group_by)
-    group_var <- as.factor(group_var)  # <-- key line
-
-    # Build long-format data frame
-    df <- data.frame(group = group_var, mat)
-    long_df <- reshape2::melt(df, id.vars = "group", variable.name = "gene", value.name = "expression")
+    # Remove cache entries for genes no longer selected
+    cached_genes <- names(gene_data_cache$data)
+    removed_genes <- setdiff(cached_genes, genes)
+    for (gene in removed_genes) {
+      gene_data_cache$data[[gene]] <- NULL
+      plot_storage[[paste0("gene_", gene)]] <- NULL  # Clear plot storage
+    }
+    
+    # Combine cached data for all selected genes
+    long_df <- do.call(rbind, lapply(genes, function(g) {
+      gene_data_cache$data[[g]]$data
+    }))
     return(long_df)
   })
 
-  output$gene_main_plot <- renderPlot({
-    req(gene_expression_data())
-    df <- gene_expression_data()
+  # Dynamic UI for plots, triggered by button
+  output$gene_plots_ui <- renderUI({
+    req(input$update_plots, displayed_genes$genes)  # Depend on button and displayed genes
+    genes <- displayed_genes$genes
     
-    # Base ggplot
-    p <- ggplot(df, aes(x = group, y = expression, fill = group)) +
-      facet_wrap(~ gene, scales = "free_y") +
-      labs(x = "Group", y = "Expression Level") +
-      theme_minimal() +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1),
-            legend.position = "none")
-    
-    # Add either violin or boxplot layer
-    if (input$gene_plot_type == "violin") {
-      p <- p + geom_violin(scale = "width", trim = TRUE)
-    } else {
-      p <- p + geom_boxplot(outlier.size = 0.5)
+    if (length(genes) == 0) {
+      return(p("No genes selected. Click 'Update Plots' to display."))
     }
     
-    # Add individual points if selected
-    if (input$gene_show_points) {
-      p <- p + geom_jitter(size = input$gene_point_size, width = 0.2, alpha = 0.5)
-    }
+    # Create plotOutput for each gene
+    plot_outputs <- lapply(genes, function(gene) {
+      plotOutput(paste0("gene_plot_", gene), height = "300px")
+    })
     
-    # Apply log scale if selected
-    if (input$gene_log_scale) {
-      p <- p + scale_y_continuous(trans = "log1p")  # log1p handles zeros better
-    }
-    
-    # Title based on plot type
-    title_text <- ifelse(input$gene_plot_type == "violin", 
-                        "Gene Expression (Violin Plot)", 
-                        "Gene Expression (Box Plot)")
-    p <- p + labs(title = title_text)
+    do.call(tagList, plot_outputs)
+  })
 
-    plot_storage$gene_main <- p
-
-    p
+  # Render individual plots when button is clicked
+  observeEvent(input$update_plots, {
+    req(input$geneSearch_tab, input$gene_group_by, gene_expression_data())
+    genes <- input$geneSearch_tab
+    
+    # Render plots for each gene
+    lapply(genes, function(gene) {
+      output[[paste0("gene_plot_", gene)]] <- renderPlot({
+        # Get cached data for this gene
+        gene_df <- gene_data_cache$data[[gene]]$data
+        
+        # Create plot
+        p <- ggplot(gene_df, aes(x = group, y = expression, fill = group)) +
+          labs(x = "Group", y = "Expression Level", title = paste(gene)) +
+          theme_minimal() +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                legend.position = "none")
+        
+        # Add violin or boxplot
+        if (input$gene_plot_type == "violin") {
+          p <- p + geom_violin(scale = "width", trim = TRUE)
+        } else {
+          p <- p + geom_boxplot(outlier.size = 0.5)
+        }
+        
+        # Add points if selected
+        if (input$gene_show_points) {
+          p <- p + geom_jitter(size = input$gene_point_size, width = 0.2, alpha = 0.5)
+        }
+        
+        # Apply log scale if selected
+        if (input$gene_log_scale) {
+          p <- p + scale_y_continuous(trans = "log1p")
+        }
+        
+        # Store plot
+        plot_storage[[paste0("gene_", gene)]] <- p
+        p
+      })
+    })
+  })
+    
+  # NEW REACTIVE EXPRESSION for metadata
+  qc_metadata_data <- reactive({
+      req(values$lazy_data)
+      
+      metadata_vals <- NULL
+      
+      # Robust check for function existence before calling
+      if (is.function(values$lazy_data$get_obs_keys)) {
+          obs_keys <- values$lazy_data$get_obs_keys(values$lazy_data$z)
+          metadata_vars <- c("celltype", "Annotation")
+          
+          for (var in metadata_vars) {
+              if (var %in% obs_keys) {
+                  # Return the entire metadata column
+                  metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var))
+                  return(metadata_vals) # Return immediately once found
+              }
+          }
+      }
+      
+      # If no metadata variable is found, return NULL or a vector of the correct size
+      # to avoid row length mismatches. We will handle the length later.
+      return(NULL)
   })
 
 
-  # qc_main_plot
-
-  # Reactive data for main plot — returns different data frames depending on plot type
+  # MODIFIED qc_main_data reactive
   qc_main_data <- reactive({
-    req(values$lazy_data, input$qc_plot_type)
-    
-    if (input$qc_plot_type == "scatter") {
-      req(input$qc_x_metric, input$qc_y_metric)
-      x <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_x_metric))
-      y <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_y_metric))
-      
-      if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
-        color <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by))
-        data.frame(X = x, Y = y, Color = color)
-      } else {
-        data.frame(X = x, Y = y)
+      req(values$lazy_data, input$qc_plot_type)
+
+      if (input$qc_plot_type == "scatter") {
+          req(input$qc_x_metric, input$qc_y_metric)
+
+          x <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_x_metric))
+          y <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_y_metric))
+
+          color_vals <- rep(0, length(x))
+
+          if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
+              color_factors <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by))
+              color_vals <- as.integer(color_factors) - 1
+          }
+          
+          # New: Get metadata from the new reactive expression
+          metadata_vals <- qc_metadata_data()
+          
+          # Check if metadata was found and if it has the right length.
+          # If not, create a vector of empty strings with the correct length.
+          if (is.null(metadata_vals) || length(metadata_vals) != length(x)) {
+              metadata_vals <- rep("", length(x))
+          }
+
+          return(data.frame(X = x, Y = y, Color = color_vals, Metadata = metadata_vals))
+
+      } else if (input$qc_plot_type == "violin") {
+          req(input$qc_metric, input$qc_group_by)
+          metric <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_metric))
+          group <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by))
+          return(data.frame(Metric = metric, Group = group))
       }
-      
-    } else {
-      req(input$qc_metric, input$qc_group_by)
-      metric <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_metric))
-      group <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by))
-      data.frame(Metric = metric, Group = group)
+  })
+
+
+  output$qc_main_plot <- renderUI({
+    if (input$qc_plot_type == "violin") {
+      tags$div(
+        class = "violin_container",
+        style = "position: relative; width:800px; height:400px;",
+        tags$canvas(id = "violin_plot", width = 800, height = 400, style = "position: absolute; top: 0; left: 0;"),
+        tags$svg(id = "violin_overlay", width = 800, height = 400, style = "position: absolute; top: 0; left: 0;")
+      )
+    } else if (input$qc_plot_type == "scatter") {
+      tags$div(id = "scatterplot", style = "width: 100%; height: 500px; position: relative;")
     }
   })
 
-  # Single renderPlot that handles all plot types
-  output$qc_main_plot <- renderPlot({
-    dat <- qc_main_data()
-    
-    # Scatter plot branch
-    if (input$qc_plot_type == "scatter") {
-      # Downsample if too large
-      if (nrow(dat) > 50000) {
-        set.seed(123)
-        dat <- dat[sample(nrow(dat), 50000), ]
-      }
+  # Consolidated observer to handle both violin and scatter plots
+  observeEvent(list(
+      qc_main_data(),
+      input$qc_plot_type,
+      input$qc_x_metric,
+      input$qc_y_metric,
+      input$qc_metric,
+      input$qc_group_by,
+      input$qc_color_by,
+      input$qc_show_points,
+      input$qc_log_scale,
+      input$qc_point_size,
+      input$qc_legend_position
+  ), {
+      # This `req()` is critical. It ensures that all inputs are available
+      # and that qc_main_data has successfully computed a value.
+      req(input$qc_plot_type, qc_main_data())
       
-      p <- ggplot(dat, aes(x = X, y = Y))
+      dat <- qc_main_data()
 
-      if ("Color" %in% colnames(dat)) {
-        p <- p + aes(color = Color)
-      }
-
-      p <- p + geom_point(alpha = 0.5, size = input$qc_point_size) +
-        labs(
-          title = paste(input$qc_x_metric, "vs", input$qc_y_metric),
-          x = input$qc_x_metric,
-          y = input$qc_y_metric
-        ) +
-        theme_minimal()
-      
-      if (input$qc_log_scale) {
-        p <- p + scale_x_log10() + scale_y_log10()
-      }
-      
-    } else {
-      # Downsample for jitter points only (violin/box)
-      if (input$qc_show_points && nrow(dat) > 20000) {
-        set.seed(123)
-        dat_points <- dat[sample(nrow(dat), 20000), ]
-      } else {
-        dat_points <- dat
-      }
-      
-      p <- ggplot(dat, aes(x = Group, y = Metric, fill = Group))
-      
       if (input$qc_plot_type == "violin") {
-        p <- p + geom_violin(trim = FALSE)
-        if (input$qc_show_points) {
-          p <- p + geom_jitter(data = dat_points, width = 0.2, alpha = 0.4, size = input$qc_point_size)
-        }
-      } else if (input$qc_plot_type == "box") {
-        p <- p + geom_boxplot()
-        if (input$qc_show_points) {
-          p <- p + geom_jitter(data = dat_points, width = 0.2, alpha = 0.4, size = input$qc_point_size)
-        }
-      } else if (input$qc_plot_type == "histogram") {
-        p <- ggplot(dat, aes(x = Metric, fill = Group)) +
-          geom_histogram(position = "identity", alpha = 0.5, bins = 50)
-      }
-      
-      if (input$qc_log_scale) {
-        p <- p + scale_y_log10()
-      }
-      
-      p <- p + theme_minimal() +
-        labs(
-          title = paste("QC Metric:", input$qc_metric),
-          x = input$qc_group_by,
-          y = input$qc_metric
-        )
-    }
+          # Prepare and send data for the violin plot
+          datasets <- lapply(unique(dat$Group), function(g) {
+              group_data <- dat[dat$Group == g, ]
+              list(
+                  values = group_data$Metric,
+                  metadata = list(name = g, n = nrow(group_data))
+              )
+          })
+          
+          message_to_send <- c(
+              list(datasets = datasets),
+              list(
+                  showPoints = input$qc_show_points,
+                  logScale = input$qc_log_scale,
+                  pointSize = input$qc_point_size,
+                  legendPosition = input$qc_legend_position
+              )
+          )
+          
+          session$sendCustomMessage("drawViolins", message_to_send)
 
-    plot_storage$qc_main <- p
-    
-    p
+      } else if (input$qc_plot_type == "scatter") {
+          # Prepare and send data for the scatterplot
+          scatterplot_matrix <- as.matrix(dat[, c("X", "Y", "Color")])
+          
+          # New: Get color levels and metadata directly here, after `req`
+          color_levels <- NULL
+          metadata_vals <- NULL
+          
+          # Check if the color_by variable exists and is not "None"
+          if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
+              # This is now safe because dat (from qc_main_data) is ready
+              color_levels <- levels(as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by)))
+          }
+
+          # Retrieve metadata directly here
+          metadata_vars <- c("celltype", "Annotation")
+          for (var in metadata_vars) {
+              if (var %in% categorical_vars()) { # Your fix is now safe to use here
+                  metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var))
+                  break
+              }
+          }
+          
+          session$sendCustomMessage("scatterplotData", list(
+              data = scatterplot_matrix,
+              x_label = input$qc_x_metric,
+              y_label = input$qc_y_metric,
+              color_by = input$qc_color_by,
+              color_levels = color_levels,
+              point_size = input$qc_point_size,
+              metadata = metadata_vals
+          ))
+      }
+  })
+
+  # Keep the separate observer for live violin updates to prevent lag
+  observeEvent(list(input$qc_show_points, input$qc_log_scale, input$qc_point_size, input$qc_legend_position), {
+    if (input$qc_plot_type == "violin") {
+        session$sendCustomMessage("updateViolinInputs", list(
+            showPoints = input$qc_show_points,
+            logScale = input$qc_log_scale,
+            pointSize = input$qc_point_size,
+            legendPosition = input$qc_legend_position
+        ))
+    }
   })
 
 
@@ -2812,45 +2938,124 @@ server <- function(input, output, session) {
     stats_df
   })
 
-  output$filter_preview <- renderText({
+  # Server logic for the enhanced filtering
+  observe({
     req(values$lazy_data)
-
-    n_genes_col <- get_first_available_column(values$lazy_data, c("n_genes", "nGenes", "genes_count"))
-    total_counts_col <- get_first_available_column(values$lazy_data, c("total_counts", "totalUMIs"))
-    pct_mito_col <- get_first_available_column(values$lazy_data, c("pct_mito", "percent_mito", "mitochondrial_percent"))
-
-    obs_list <- list()
-    if (!is.null(n_genes_col)) obs_list[["n_genes"]] <- n_genes_col
-    if (!is.null(total_counts_col)) obs_list[["total_counts"]] <- total_counts_col
-    if (!is.null(pct_mito_col)) obs_list[["pct_mito"]] <- pct_mito_col
     
-    obs_df <- as.data.frame(obs_list)
+    # Get available columns from the dataset
+    available_cols <- numeric_obs_keys()
     
-    filters <- c()
-    passing <- rep(TRUE, nrow(obs_df))
+    # Update dropdown choices
+    updateSelectInput(session, "mito_var_select",
+                    choices = c("Choose variable" = "", available_cols),
+                    selected = get_first_available_column(values$lazy_data, 
+                                                              c("pct_mito", "percent_mito", "mitochondrial_percent", "percent.mt")))
     
-    if ("n_genes" %in% names(obs_df)) {
-      filters <- c(filters, "n_genes > 200")
-      passing <- passing & (obs_df$n_genes > 200)
-    }
+    updateSelectInput(session, "counts_var_select",
+                    choices = c("Choose variable" = "", available_cols),
+                    selected = get_first_available_column(values$lazy_data, 
+                                                              c("total_counts", "totalUMIs", "nCount_RNA", "nUMI")))
     
-    if ("pct_mito" %in% names(obs_df)) {
-      filters <- c(filters, "pct_mito < 5")
-      passing <- passing & (obs_df$pct_mito < 5)
-    }
-    
-    if ("total_counts" %in% names(obs_df)) {
-      filters <- c(filters, "total_counts > 1000")
-      passing <- passing & (obs_df$total_counts > 1000)
-    }
-    
-    passing_count <- sum(passing)
-    total_count <- nrow(obs_df)
-    
-    paste0(passing_count, " / ", total_count, " cells (",
-          round(passing_count / total_count * 100, 2), "%) pass filters: ",
-          paste(filters, collapse = ", "))
+    updateSelectInput(session, "genes_var_select",
+                    choices = c("Choose variable" = "", available_cols),
+                    selected = get_first_available_column(values$lazy_data, 
+                                                              c("n_genes", "nGenes", "genes_count", "nFeature_RNA")))
   })
+
+  # Enhanced filter preview output
+  output$filter_preview_enhanced <- renderText({
+    req(values$lazy_data)
+    
+    # Get total number of cells
+    total_cells <- nrow(values$lazy_data$df)
+    
+    # Initialize passing filter
+    passing <- rep(TRUE, total_cells)
+    filters_applied <- c()
+    
+    # Apply mitochondrial filter
+    if (!is.null(input$mito_var_select) && input$mito_var_select != "") {
+      mito_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$mito_var_select)
+      if (!is.null(mito_data) && !is.null(input$mito_min) && !is.null(input$mito_max)) {
+        passing <- passing & (mito_data >= input$mito_min & mito_data <= input$mito_max)
+        filters_applied <- c(filters_applied, 
+                            paste0(input$mito_var_select, ": ", input$mito_min, "-", input$mito_max, "%"))
+      }
+    }
+    
+    # Apply counts filter
+    if (!is.null(input$counts_var_select) && input$counts_var_select != "") {
+      counts_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$counts_var_select)
+      if (!is.null(counts_data)) {
+        counts_filter <- rep(TRUE, length(counts_data))
+        
+        if (!is.null(input$counts_min) && !is.na(input$counts_min)) {
+          counts_filter <- counts_filter & (counts_data >= input$counts_min)
+        }
+        if (!is.null(input$counts_max) && !is.na(input$counts_max)) {
+          counts_filter <- counts_filter & (counts_data <= input$counts_max)
+        }
+        
+        passing <- passing & counts_filter
+        
+        filter_text <- paste0(input$counts_var_select, ": ")
+        if (!is.null(input$counts_min) && !is.na(input$counts_min)) {
+          filter_text <- paste0(filter_text, "≥", input$counts_min)
+        }
+        if (!is.null(input$counts_max) && !is.na(input$counts_max)) {
+          if (!is.null(input$counts_min) && !is.na(input$counts_min)) {
+            filter_text <- paste0(filter_text, " & ≤", input$counts_max)
+          } else {
+            filter_text <- paste0(filter_text, "≤", input$counts_max)
+          }
+        }
+        filters_applied <- c(filters_applied, filter_text)
+      }
+    }
+    
+    # Apply genes filter
+    if (!is.null(input$genes_var_select) && input$genes_var_select != "") {
+      genes_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$genes_var_select)
+      if (!is.null(genes_data)) {
+        genes_filter <- rep(TRUE, length(genes_data))
+        
+        if (!is.null(input$genes_min) && !is.na(input$genes_min)) {
+          genes_filter <- genes_filter & (genes_data >= input$genes_min)
+        }
+        if (!is.null(input$genes_max) && !is.na(input$genes_max)) {
+          genes_filter <- genes_filter & (genes_data <= input$genes_max)
+        }
+        
+        passing <- passing & genes_filter
+        
+        filter_text <- paste0(input$genes_var_select, ": ")
+        if (!is.null(input$genes_min) && !is.na(input$genes_min)) {
+          filter_text <- paste0(filter_text, "≥", input$genes_min)
+        }
+        if (!is.null(input$genes_max) && !is.na(input$genes_max)) {
+          if (!is.null(input$genes_min) && !is.na(input$genes_min)) {
+            filter_text <- paste0(filter_text, " & ≤", input$genes_max)
+          } else {
+            filter_text <- paste0(filter_text, "≤", input$genes_max)
+          }
+        }
+        filters_applied <- c(filters_applied, filter_text)
+      }
+    }
+
+      
+    passing_cells <- sum(passing, na.rm = TRUE)
+    
+    if (length(filters_applied) == 0) {
+      return("No filters applied")
+    }
+    
+    paste0(passing_cells, " / ", total_cells, " cells (", 
+          round(passing_cells / total_cells * 100, 1), "%) pass filters:\n",
+          paste(filters_applied, collapse = "\n"))
+  })
+
+  
 
   output$qc_detailed_table <- DT::renderDataTable({
     req(values$lazy_data)
@@ -2877,95 +3082,79 @@ server <- function(input, output, session) {
     )
   })
 
-  # Reactive value to track canvas data readiness
   canvas_data_ready <- reactiveVal(FALSE)
-  
+
+  # Reactive value to track report generation status
+  report_generation_status <- reactiveVal("idle") # Can be "idle", "capturing", "ready"
+
+  # New button to start the report generation process
+  observeEvent(input$generate_report_button, {
+    # Show a modal dialog to the user
+    showModal(modalDialog(
+      id = "report_modal",
+      title = "Generating Report...",
+      "Capturing dynamic plots. Please wait...",
+      footer = NULL,
+      easyClose = FALSE
+    ))
+
+    # Reset the status and trigger the canvas capture
+    report_generation_status("capturing")
+    print("Triggering canvas capture for report...")
+    session$sendCustomMessage("captureCanvases", list(debug = "modal_trigger"))
+  })
+
   # Observe canvas data sent from JavaScript
   observeEvent(input$canvas_data, {
+    # This event will now update the plot_storage and the status
     print("Received canvas_data from JavaScript")
-    print(str(input$canvas_data)) # Debug: Inspect structure
     plot_storage$canvases <- input$canvas_data
     print("Updated plot_storage$canvases")
-    print(str(plot_storage$canvases)) # Debug: Confirm update
-    canvas_data_ready(TRUE) # Signal that canvas data is ready
+
+    # Set the status to "ready" once the canvas data is received
+    # This is the line that was missing or in the wrong place.
+    report_generation_status("ready")
+    removeModal() # Remove the "Please wait" modal
   })
-  
-  # Manual test button for canvas capture
-  observeEvent(input$test_capture, {
-    print("Manually triggering canvas capture...")
-    session$sendCustomMessage("captureCanvases", list(debug = "manual_trigger"))
+
+  # Dynamic UI for the download button
+  output$download_button_ui <- renderUI({
+    if (report_generation_status() == "ready") {
+      downloadButton("download_report", "Download Report")
+    } else {
+      actionButton("generate_report_button", "Generate Report")
+    }
   })
-  
+
   output$download_report <- downloadHandler(
     filename = function() {
       paste("analysis_report_", Sys.Date(), ".html", sep = "")
     },
     content = function(file) {
       withProgress(message = 'Generating Report...', {
-        # Check if canvas data is available
-        if (!canvas_data_ready()) {
-          print("Warning: No canvas data available. Attempting to capture now...")
-          session$sendCustomMessage("captureCanvases", list(debug = "download_trigger"))
-          
-          # Wait briefly for canvas data
-          max_attempts <- 20 # 10 seconds
-          attempt <- 1
-          start_time <- Sys.time()
-          while (!canvas_data_ready() && attempt <= max_attempts) {
-            print(paste("Attempt", attempt, ": Waiting for canvas data..."))
-            Sys.sleep(0.5)
-            attempt <- attempt + 1
-          }
-          
-          elapsed_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
-          if (!canvas_data_ready()) {
-            print(paste("Timeout: No canvas data received after", round(elapsed_time, 2), "seconds."))
-          } else {
-            print(paste("Canvas data received after", round(elapsed_time, 2), "seconds."))
-          }
-        } else {
-          print("Using pre-captured canvas data.")
+
+        # The downloadHandler now executes only AFTER the canvas data is ready.
+        # The waiting logic is no longer needed here.
+        if (is.null(plot_storage$canvases) || length(plot_storage$canvases) == 0) {
+          showNotification("Error: Canvas images were not captured.", type = "error")
+          return()
         }
-        
+
         # Create temporary directory for plots
-        # Use system temp directory instead of getwd()
         temp_dir <- file.path(tempdir(), "plots")
         dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
         plot_dir <- temp_dir
-        
+
         # Save static plots as image files
         saved_plots <- list()
-        
-        # Save heatmap1 if it exists
+
+        # ... (All your plot-saving code) ...
         if (!is.null(plot_storage$heatmap1)) {
           hm1_file <- file.path(plot_dir, "heatmap1.png")
           png(hm1_file, width = 10, height = 6, units = "in", res = 300)
-          draw(plot_storage$heatmap1) # Use draw() for ComplexHeatmap objects
+          draw(plot_storage$heatmap1)
           dev.off()
           saved_plots$heatmap1 <- hm1_file
-        }
-
-        # Save heatmap2 if it exists
-        if (!is.null(plot_storage$heatmap2)) {
-          hm2_file <- file.path(plot_dir, "heatmap2.png")
-          png(hm2_file, width = 10, height = 6, units = "in", res = 300)
-          draw(plot_storage$heatmap2) # Use draw() for ComplexHeatmap objects
-          dev.off()
-          saved_plots$heatmap2 <- hm2_file
-        }
-
-        # Save gene_main if it exists (assuming it's a ggplot object)
-        if (!is.null(plot_storage$gene_main)) {
-          gene_file <- file.path(plot_dir, "gene_main.png")
-          ggsave(gene_file, plot_storage$gene_main, width = 10, height = 6, dpi = 300)
-          saved_plots$gene_main <- gene_file
-        }
-
-        # Save qc_main if it exists (assuming it's a ggplot object)
-        if (!is.null(plot_storage$qc_main)) {
-          qc_file <- file.path(plot_dir, "qc_main.png")
-          ggsave(qc_file, plot_storage$qc_main, width = 10, height = 6, dpi = 300)
-          saved_plots$qc_main <- qc_file
         }
         
         # Save canvas images
@@ -2974,51 +3163,52 @@ server <- function(input, output, session) {
           for (canvas_id in names(plot_storage$canvases)) {
             print(paste("Processing canvas:", canvas_id))
             data_url <- plot_storage$canvases[[canvas_id]]
-            img_data <- sub("^data:image/(png|jpeg);base64,", "", data_url)
-            img_file <- file.path(plot_dir, paste0(canvas_id, ".jpg"))
-            writeBin(base64enc::base64decode(img_data), img_file)
-            saved_plots[[canvas_id]] <- img_file
-            print(paste("Saved canvas image:", img_file))
+            if (!is.null(data_url) && nchar(data_url) > 1000) {
+              img_data <- sub("^data:image/(png|jpeg);base64,", "", data_url)
+              img_file <- file.path(plot_dir, paste0(canvas_id, ".jpg"))
+              writeBin(base64enc::base64decode(img_data), img_file)
+              saved_plots[[canvas_id]] <- img_file
+              print(paste("Saved canvas image with legend:", img_file))
+            } else {
+              print(paste("Invalid or empty data URL for canvas:", canvas_id))
+            }
           }
         } else {
           print("No canvas images to save.")
         }
-        
-        # Reset canvas_data_ready for the next download
-        canvas_data_ready(FALSE)
-        
+
+        # Reset status for the next run
+        report_generation_status("idle")
+
         # Copy the R Markdown template
         tempReport <- file.path(temp_dir, "report_template.Rmd")
         file.copy("report_template.Rmd", tempReport, overwrite = TRUE)
-        
+
         # Prepare parameters
         params <- list(
           app_data = list(
             saved_plots = saved_plots,
             canvas_info = plot_storage$canvases,
+            violin_genes = displayed_genes$genes,
             timestamp = Sys.time(),
             user_inputs = reactiveValuesToList(input),
             plot_dir = plot_dir
           )
         )
 
-        print(length(reactiveValuesToList(input))) # Debug: Inspect user inputs
-        
         # Render the document
         print("Starting R Markdown rendering...")
-        start_time <- Sys.time()
         rmarkdown::render(
           input = tempReport,
           output_file = file,
           params = params,
           envir = new.env(parent = globalenv())
         )
-        render_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
-        print(paste("Report rendering complete in", round(render_time, 2), "seconds."))
+        print("Report rendering complete.")
       })
     }
   )
-
+  
   plot_storage <- reactiveValues(
     heatmap1 = NULL,
     heatmap2 = NULL,

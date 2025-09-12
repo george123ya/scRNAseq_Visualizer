@@ -35,6 +35,14 @@ This report was written by [George Muñoz](https://github.com/george123ya) at th
 
 ## Visualization Results
 
+```{r heatmap-section-header, eval=!is.null(saved_plots$heatmap1) || !is.null(saved_plots$heatmap2), results='asis'}
+cat("### Heatmap Visualizations\n\n")
+```
+
+```{r heatmap1-header, eval=!is.null(saved_plots$heatmap1), results='asis'}
+cat("#### Individual Genes\n\n")
+```
+
 ```{r heatmap1-details, eval=!is.null(saved_plots$heatmap1), results='asis'}
 if(!is.null(user_inputs$heatmap_genes_panel1)) {
   cat("**Input Parameters:**\n\n")
@@ -46,17 +54,17 @@ if(!is.null(user_inputs$heatmap_genes_panel1)) {
   cat("**Reproducible Code:**\n\n")
   cat("```r\n")
   cat("# Load analysis functions\n")
-  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
+  cat("source('https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R?raw=true')\n\n")
   
   cat("# Initialize data connection\n")
-  cat("zarr_file <- 'path/to/your/dataset.zarr'  # or .h5ad file\n")
+  cat(paste0("zarr_file <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'  # or .h5ad file\n"))
   cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
   
   cat("# Process genes for Panel 1\n")
   # Clean up genes and remove empty strings, then format properly
   genes_clean <- trimws(unlist(strsplit(user_inputs$heatmap_genes_panel1, ",|\\s+")))
   genes_clean <- genes_clean[genes_clean != "" & !is.na(genes_clean)]
-  cat("genes <- c(", paste(paste0("\"", genes_clean, "\""), collapse = ","), ")\n")
+  cat("genes <- c(", paste(paste0("\"", genes_clean, "\""), collapse = ", "), ")\n")
   cat("genes <- toupper(trimws(genes))\n")
   cat("genes <- genes[genes %in% toupper(lazy_data$genes)]\n\n")
   
@@ -72,9 +80,9 @@ if(!is.null(user_inputs$heatmap_genes_panel1)) {
   cat("# Process heatmap data\n")
   cat("heatmap_data <- process_heatmap_data(\n")
   cat("  mat=mat,\n")
-  cat("  score_type=\"", user_inputs$heatmap_score_panel1, "\",\n")
-  cat("  cell_group_mode=\"", user_inputs$heatmap_cell_group_mode_panel1, "\",\n")
-  cat("  cluster_by=\"", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "", user_inputs$heatmap_cluster_by_panel1), "\"\n")
+  cat(paste0("  score_type=\"", user_inputs$heatmap_score_panel1, "\",\n"))
+  cat(paste0("  cell_group_mode=\"", user_inputs$heatmap_cell_group_mode_panel1, "\",\n"))
+  cat(paste0("  cluster_by=\"", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "", user_inputs$heatmap_cluster_by_panel1), "\"\n"))
   cat(")\n\n")
   
   cat("# Generate heatmap\n")
@@ -84,6 +92,14 @@ if(!is.null(user_inputs$heatmap_genes_panel1)) {
   
   cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
 }
+```
+
+```{r heatmap1-plot, eval=!is.null(saved_plots$heatmap1)}
+include_graphics(normalizePath(saved_plots$heatmap1))
+```
+
+```{r heatmap2-header, eval=!is.null(saved_plots$heatmap2), results='asis'}
+cat("#### Gene Sets / Pathways\n\n")
 ```
 
 ```{r heatmap2-details, eval=!is.null(saved_plots$heatmap2), results='asis'}
@@ -110,7 +126,7 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
   cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
   
   cat("# Initialize data connection\n")
-  cat("zarr_file <- 'path/to/your/dataset.zarr'  # or .h5ad file\n")
+  cat(paste0("zarr_file <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'  # or .h5ad file\n"))
   cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
   
   if(user_inputs$heatmap_gene_group_mode_panel2 == "pathways") {
@@ -123,7 +139,7 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
       cat("gene_groups <- pathways[selected_pathways]\n")
     }
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "custom_gmt") {
-    cat("# Load GMT file (replace with your GMT file path)\n")
+    cat("# Load GMT file\n")
     cat("gmt_data <- parse_gmt_file('path/to/your/geneset.gmt')\n")
     if("ALL" %in% user_inputs$heatmap_gmt_sets_panel2) {
       cat("gene_groups <- gmt_data  # All GMT gene sets selected\n")
@@ -132,7 +148,7 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
       cat("gene_groups <- gmt_data[selected_gmt]\n")
     }
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "manual") {
-    cat("# Manual gene sets (replace with your gene sets)\n")
+    cat("# Define manual gene sets\n")
     cat("manual_genesets <- list(\n")
     if(!is.null(user_inputs$selected_manual_genesets)) {
       for(i in seq_along(user_inputs$selected_manual_genesets)) {
@@ -163,12 +179,94 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
 }
 ```
 
+```{r heatmap2-plot, eval=!is.null(saved_plots$heatmap2)}
+include_graphics(normalizePath(saved_plots$heatmap2))
+```
+
+
 ```{r gene-section-header, eval=!is.null(saved_plots$gene_main), results='asis'}
 cat("### Gene Expression Analysis\n\n")
 ```
 
 ```{r gene-analysis-header, eval=!is.null(saved_plots$gene_main), results='asis'}
 cat("#### Main Gene Analysis Plot\n\n")
+```
+
+```{r gene-plot-details, eval=!is.null(saved_plots$gene_main), results='asis'}
+if(!is.null(user_inputs$geneSearch_tab)) {
+  cat("**Input Parameters:**\n\n")
+  cat("- **Selected Genes:**", paste(user_inputs$geneSearch_tab, collapse=", "), "\n")
+  cat("- **Group By:**", user_inputs$gene_group_by, "\n")
+  cat("- **Plot Type:**", user_inputs$gene_plot_type, "\n")
+  cat("- **Show Points:**", user_inputs$gene_show_points, "\n")
+  cat("- **Point Size:**", user_inputs$gene_point_size, "\n")
+  cat("- **Log Scale:**", user_inputs$gene_log_scale, "\n\n")
+  
+  cat("**Reproducible Code:**\n\n")
+  cat("```r\n")
+  cat("# Load required libraries\n")
+  cat("library(ggplot2)\n")
+  cat("library(reshape2)\n\n")
+  
+  cat("# Load analysis functions\n")
+  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
+  
+  cat("# Initialize data connection\n")
+  cat(paste0("zarr_file <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'  # or .h5ad file\n"))
+  cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
+  
+  cat("# Define selected genes\n")
+  genes_clean <- trimws(user_inputs$geneSearch_tab)
+  genes_clean <- genes_clean[genes_clean != "" & !is.na(genes_clean)]
+  cat("genes <- c(", paste(paste0("\"", genes_clean, "\""), collapse = ", "), ")\n")
+  cat("genes <- toupper(trimws(genes))\n")
+  cat("genes <- genes[genes %in% toupper(lazy_data$genes)]\n\n")
+  
+  cat("# Extract expression data\n")
+  cat("expr_list <- lapply(genes, function(g) {\n")
+  cat("  lazy_data$get_gene_expression(gene_name = g)\n")
+  cat("})\n")
+  cat("mat <- do.call(cbind, expr_list)\n")
+  cat("colnames(mat) <- genes\n\n")
+  
+  cat("# Get grouping variable\n")
+  cat("group_var <- lazy_data$get_obs_column(lazy_data$z, \"", user_inputs$gene_group_by, "\")\n")
+  cat("group_var <- as.factor(group_var)\n\n")
+  
+  cat("# Build long-format data frame\n")
+  cat("df <- data.frame(group = group_var, mat)\n")
+  cat("long_df <- reshape2::melt(df, id.vars = \"group\", variable.name = \"gene\", value.name = \"expression\")\n\n")
+  
+  cat("# Generate plot\n")
+  cat("p <- ggplot(long_df, aes(x = group, y = expression, fill = group)) +\n")
+  cat("  facet_wrap(~ gene, scales = \"free_y\") +\n")
+  cat("  labs(x = \"Group\", y = \"Expression Level\") +\n")
+  cat("  theme_minimal() +\n")
+  cat("  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = \"none\")\n\n")
+  
+  cat("# Add plot layer\n")
+  if(user_inputs$gene_plot_type == "violin") {
+    cat("p <- p + geom_violin(scale = \"width\", trim = TRUE)\n")
+  } else {
+    cat("p <- p + geom_boxplot(outlier.size = 0.5)\n")
+  }
+  
+  if(user_inputs$gene_show_points) {
+    cat("p <- p + geom_jitter(size = ", user_inputs$gene_point_size, ", width = 0.2, alpha = 0.5)\n")
+  }
+  
+  if(user_inputs$gene_log_scale) {
+    cat("p <- p + scale_y_continuous(trans = \"log1p\")\n")
+  }
+  
+  cat("p <- p + labs(title = \"", ifelse(user_inputs$gene_plot_type == "violin", "Gene Expression (Violin Plot)", "Gene Expression (Box Plot)"), "\")\n\n")
+  
+  cat("# Display plot\n")
+  cat("print(p)\n")
+  cat("```\n\n")
+  
+  cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
+}
 ```
 
 ```{r gene-analysis-plot, eval=!is.null(saved_plots$gene_main)}
@@ -179,12 +277,132 @@ include_graphics(normalizePath(saved_plots$gene_main))
 cat("\n\nThis plot shows the main gene expression analysis results.\n")
 ```
 
+```{r violin-plots-header, eval=length(params$app_data$violin_genes) > 0, results='asis'}
+cat("#### Individual Gene Violin Plots\n\n")
+```
+
+```{r violin-plots, eval=length(params$app_data$violin_genes) > 0, results='asis'}
+if (length(params$app_data$violin_genes) > 0) {
+  for (gene in params$app_data$violin_genes) {
+    plot_name <- paste0("violin_", gene)
+    if (!is.null(params$app_data$saved_plots[[plot_name]])) {
+      cat(sprintf("##### %s\n", gene))
+      cat(sprintf("![%s](%s){width=80%%}\n\n", plot_name, normalizePath(params$app_data$saved_plots[[plot_name]])))
+    }
+  }
+} else {
+  cat("No individual violin plots available.\n\n")
+}
+```
+
 ```{r qc-section-header, eval=!is.null(saved_plots$qc_main), results='asis'}
 cat("### Quality Control\n\n")
 ```
 
 ```{r qc-analysis-header, eval=!is.null(saved_plots$qc_main), results='asis'}
 cat("#### Quality Control Plot\n\n")
+```
+
+```{r qc-plot-details, eval=!is.null(saved_plots$qc_main), results='asis'}
+if(!is.null(user_inputs$qc_plot_type)) {
+  cat("**Input Parameters:**\n\n")
+  cat("- **Plot Type:**", user_inputs$qc_plot_type, "\n")
+  if(user_inputs$qc_plot_type == "scatter") {
+    cat("- **X Metric:**", user_inputs$qc_x_metric, "\n")
+    cat("- **Y Metric:**", user_inputs$qc_y_metric, "\n")
+    cat("- **Color By:**", ifelse(is.null(user_inputs$qc_color_by) || user_inputs$qc_color_by == "None", "None", user_inputs$qc_color_by), "\n")
+  } else {
+    cat("- **Metric:**", user_inputs$qc_metric, "\n")
+    cat("- **Group By:**", user_inputs$qc_group_by, "\n")
+  }
+  cat("- **Show Points (Violin/Box):**", user_inputs$qc_show_points, "\n")
+  cat("- **Point Size:**", user_inputs$qc_point_size, "\n")
+  cat("- **Log Scale:**", user_inputs$qc_log_scale, "\n\n")
+  
+  cat("**Reproducible Code:**\n\n")
+  cat("```r\n")
+  cat("# Load required libraries\n")
+  cat("library(ggplot2)\n\n")
+  
+  cat("# Load analysis functions\n")
+  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
+  
+  cat("# Initialize data connection\n")
+  cat(paste0("zarr_file <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'  # or .h5ad file\n"))
+  cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
+  
+  if(user_inputs$qc_plot_type == "scatter") {
+    cat("# Prepare data for scatter plot\n")
+    cat("x <- as.numeric(lazy_data$get_obs_column(lazy_data$z, \"", user_inputs$qc_x_metric, "\"))\n")
+    cat("y <- as.numeric(lazy_data$get_obs_column(lazy_data$z, \"", user_inputs$qc_y_metric, "\"))\n")
+    if(!is.null(user_inputs$qc_color_by) && user_inputs$qc_color_by != "None") {
+      cat("color <- as.factor(lazy_data$get_obs_column(lazy_data$z, \"", user_inputs$qc_color_by, "\"))\n")
+      cat("dat <- data.frame(X = x, Y = y, Color = color)\n")
+    } else {
+      cat("dat <- data.frame(X = x, Y = y)\n")
+    }
+    cat("if(nrow(dat) > 50000) {\n")
+    cat("  set.seed(123)\n")
+    cat("  dat <- dat[sample(nrow(dat), 50000), ]\n")
+    cat("}\n\n")
+    
+    cat("# Generate scatter plot\n")
+    cat("p <- ggplot(dat, aes(x = X, y = Y))\n")
+    if(!is.null(user_inputs$qc_color_by) && user_inputs$qc_color_by != "None") {
+      cat("p <- p + aes(color = Color)\n")
+    }
+    cat("p <- p + geom_point(alpha = 0.5, size = ", user_inputs$qc_point_size, ") +\n")
+    cat("  labs(title = \"", user_inputs$qc_x_metric, " vs ", user_inputs$qc_y_metric, "\",\n")
+    cat("       x = \"", user_inputs$qc_x_metric, "\",\n")
+    cat("       y = \"", user_inputs$qc_y_metric, "\") +\n")
+    cat("  theme_minimal()\n")
+    if(user_inputs$qc_log_scale) {
+      cat("p <- p + scale_x_log10() + scale_y_log10()\n")
+    }
+  } else {
+    cat("# Prepare data for violin/box/histogram plot\n")
+    cat("metric <- as.numeric(lazy_data$get_obs_column(lazy_data$z, \"", user_inputs$qc_metric, "\"))\n")
+    cat("group <- as.factor(lazy_data$get_obs_column(lazy_data$z, \"", user_inputs$qc_group_by, "\"))\n")
+    cat("dat <- data.frame(Metric = metric, Group = group)\n")
+    cat("if(", user_inputs$qc_show_points, " && nrow(dat) > 20000) {\n")
+    cat("  set.seed(123)\n")
+    cat("  dat_points <- dat[sample(nrow(dat), 20000), ]\n")
+    cat("} else {\n")
+    cat("  dat_points <- dat\n")
+    cat("}\n\n")
+    
+    cat("# Generate plot\n")
+    if(user_inputs$qc_plot_type == "violin") {
+      cat("p <- ggplot(dat, aes(x = Group, y = Metric, fill = Group)) +\n")
+      cat("  geom_violin(trim = FALSE)\n")
+      if(user_inputs$qc_show_points) {
+        cat("p <- p + geom_jitter(data = dat_points, width = 0.2, alpha = 0.4, size = ", user_inputs$qc_point_size, ")\n")
+      }
+    } else if(user_inputs$qc_plot_type == "box") {
+      cat("p <- ggplot(dat, aes(x = Group, y = Metric, fill = Group)) +\n")
+      cat("  geom_boxplot()\n")
+      if(user_inputs$qc_show_points) {
+        cat("p <- p + geom_jitter(data = dat_points, width = 0.2, alpha = 0.4, size = ", user_inputs$qc_point_size, ")\n")
+      }
+    } else if(user_inputs$qc_plot_type == "histogram") {
+      cat("p <- ggplot(dat, aes(x = Metric, fill = Group)) +\n")
+      cat("  geom_histogram(position = \"identity\", alpha = 0.5, bins = 50)\n")
+    }
+    cat("p <- p + theme_minimal() +\n")
+    cat("  labs(title = \"QC Metric: ", user_inputs$qc_metric, "\",\n")
+    cat("       x = \"", user_inputs$qc_group_by, "\",\n")
+    cat("       y = \"", user_inputs$qc_metric, "\")\n")
+    if(user_inputs$qc_log_scale) {
+      cat("p <- p + scale_y_log10()\n")
+    }
+  }
+  
+  cat("# Display plot\n")
+  cat("print(p)\n")
+  cat("```\n\n")
+  
+  cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
+}
 ```
 
 ```{r qc-analysis-plot, eval=!is.null(saved_plots$qc_main)}
