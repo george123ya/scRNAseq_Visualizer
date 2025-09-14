@@ -416,177 +416,504 @@ Shiny.addCustomMessageHandler('updateViolinInputs', function(message) {
     updatePlot();
 });
 
-// This function needs to be outside the message handler to be accessible
+// **5. Shared State for Scatterplot** (Unchanged)
+let scatterState = {
+  scatterplot: null,
+  normalizedPoints: [],
+  originalPoints: [],
+  xDomain: [0, 1],
+  yDomain: [0, 1],
+  currentView: null,
+  drawOptions: {},
+  xLabel: '',
+  yLabel: '',
+  logScale: false,
+  xAxis: null,
+  yAxis: null,
+  xAxisG: null,
+  yAxisG: null,
+  viewSubscription: null
+};
+
+// **6. normalizePoints** (Add validation log)
+function normalizePoints(points, xDomain, yDomain, logScale) {
+  let xMin = xDomain[0], xMax = xDomain[1];
+  let yMin = yDomain[0], yMax = yDomain[1];
+  const epsilon = 1e-6;
+  if (xMax - xMin < epsilon) { 
+    xMax = xMin + epsilon; 
+    console.warn('Zero x-range; added epsilon');
+  }
+  if (yMax - yMin < epsilon) { 
+    yMax = yMin + epsilon; 
+    console.warn('Zero y-range; added epsilon');
+  }
+  if (isNaN(xMin) || isNaN(xMax) || isNaN(yMin) || isNaN(yMax)) {
+    console.error('Invalid domains in normalizePoints:', { xDomain, yDomain });
+    return points.map(() => [-1, -1, 0, 0]);  // Fallback degenerate points
+  }
+  const xScale = logScale ? d3.scaleLog().domain([Math.max(xMin, 1e-6), xMax]).range([0, 1]) : d3.scaleLinear().domain([xMin, xMax]).range([0, 1]);
+  const yScale = logScale ? d3.scaleLog().domain([Math.max(yMin, 1e-6), yMax]).range([0, 1]) : d3.scaleLinear().domain([yMin, yMax]).range([0, 1]);
+  
+  return points.map(p => [
+    (logScale ? xScale(p[0]) : (p[0] - xMin) / (xMax - xMin)) * 2 - 1,
+    (logScale ? yScale(p[1]) : (p[1] - yMin) / (yMax - yMin)) * 2 - 1,
+    p[2],
+    p[3]
+  ]);
+}
+
+// **7. computeDrawOptions** (Unchanged)
+function computeDrawOptions(colorBy, colorLevels) {
+  const options = { colorBy: null, pointColor: ['#000000'] };
+  if (colorBy !== "None" && colorLevels && colorLevels.length > 0) {
+    options.colorBy = 'valueA';
+    const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
+    options.pointColor = colorScale.domain(d3.range(colorLevels.length)).range();
+  }
+  return options;
+}
+
+// **UPDATED: Shared Axes Update Function** (Add NaN checks)
+function updateAxesFromView(event, margin, width, height) {
+  if (!scatterState.xDomain || !scatterState.yDomain || !event || !event.xScale || !event.yScale || 
+      !scatterState.xAxis || !scatterState.yAxis || !scatterState.xAxisG || !scatterState.yAxisG) {
+    console.warn('Skipping axes update: invalid inputs');
+    return;
+  }
+  const xDom = event.xScale.domain();
+  const yDom = event.yScale.domain();
+  if (xDom.some(isNaN) || yDom.some(isNaN) || xDom[0] === undefined || yDom[0] === undefined) {
+    console.warn('Skipping axes update: NaN/invalid event domains', { xDom, yDom });
+    return;
+  }
+  const rangeX = scatterState.xDomain[1] - scatterState.xDomain[0];
+  const rangeY = scatterState.yDomain[1] - scatterState.yDomain[0];
+  const newXDomain = [
+    scatterState.xDomain[0] + (xDom[0] + 1) / 2 * rangeX,
+    scatterState.xDomain[0] + (xDom[1] + 1) / 2 * rangeX
+  ];
+  const newYDomain = [
+    scatterState.yDomain[0] + (yDom[0] + 1) / 2 * rangeY,
+    scatterState.yDomain[0] + (yDom[1] + 1) / 2 * rangeY
+  ];
+  if (newXDomain.some(isNaN) || newYDomain.some(isNaN)) {
+    console.warn('Skipping axes update: NaN computed domains', { newXDomain, newYDomain });
+    return;
+  }
+  const newXScale = d3.scaleLinear().domain(newXDomain).range([margin.left, width - margin.right]);
+  const newYScale = d3.scaleLinear().domain(newYDomain).range([height - margin.bottom, margin.top]);
+  scatterState.xAxis.scale(newXScale);
+  scatterState.yAxis.scale(newYScale);
+  scatterState.xAxisG.call(scatterState.xAxis);
+  scatterState.yAxisG.call(scatterState.yAxis);
+  console.log('Axes updated successfully');
+}
+
+// **UPDATED: RAF Updater** (Add validity checks; auto-stop after ~600ms transition)
+function startAnimatedAxesUpdate(scatterplot, container, margin, width, height, xDomain, yDomain) {
+  if (!scatterplot || !xDomain || !yDomain || xDomain.some(isNaN) || yDomain.some(isNaN)) {
+    console.warn('Skipping animated axes: invalid params');
+    return () => {};
+  }
+
+  let rafId;
+  let latestEvent = null;
+  const startTime = Date.now();
+  const transitionDuration = 600;  // ms; match regl default
+
+  const tempHandler = (event) => { 
+    latestEvent = { xScale: event.xScale, yScale: event.yScale };  // FIXED: Keep scales, extract domain in updateAxes
+  };
+  const tempSub = scatterplot.subscribe('view', tempHandler);
+  scatterState.viewSubscription = { handler: tempHandler, sub: tempSub };
+
+  const updateAxes = () => {
+    if (Date.now() - startTime > transitionDuration) {
+      console.log('Animation loop stopped: transition complete');
+      return;  // Auto-stop after duration
+    }
+    if (latestEvent && !latestEvent.xScale.domain().some(isNaN)) {
+      updateAxesFromView(latestEvent, margin, width, height);
+    }
+    rafId = requestAnimationFrame(updateAxes);
+  };
+  updateAxes();
+
+  return () => {
+    cancelAnimationFrame(rafId);
+    if (scatterState.viewSubscription) {
+      const { handler, sub } = scatterState.viewSubscription;
+      if (sub && typeof sub.unsubscribe === 'function') {
+        sub.unsubscribe();
+      } else if (scatterplot._pubSub) {
+        scatterplot._pubSub.unsubscribe('view', handler);
+      }
+      scatterState.viewSubscription = null;
+    }
+  };
+}
+
+// **UPDATED: autoAdjustZoom** (Better validation; fallback to reset)
 const autoAdjustZoom = (points, scatterplot, xDomain, yDomain) => {
-    if (!points || points.length === 0) {
-      console.warn('No points to zoom to.');
-      return;
+  if (!points || points.length === 0) {
+    console.warn('Invalid zoom: no points');
+    return;
+  }
+  if (!xDomain || !yDomain || xDomain.some(d => d === undefined || isNaN(d)) || yDomain.some(d => d === undefined || isNaN(d))) {
+    console.warn('Invalid zoom params; falling back to reset', { xDomain, yDomain });
+    try {
+      scatterplot.reset({ preventEvent: false });  // Triggers view event for sync
+    } catch (e) {
+      console.error('Reset error:', e);
     }
-    if (!xDomain[0] || !xDomain[1] || !yDomain[0] || !yDomain[1]) {
-      console.warn('Invalid domain values:', xDomain, yDomain);
-      return;
-    }
-    const rangeX = xDomain[1] - xDomain[0] || 2;
-    const rangeY = yDomain[1] - yDomain[0] || 2;
+    return;
+  }
+  try {
+    const rangeX = xDomain[1] - xDomain[0];
+    const rangeY = yDomain[1] - yDomain[0];
     const padX = rangeX * 0.1;
     const padY = rangeY * 0.1;
-    const normalizedX = ((xDomain[0] - padX) - xDomain[0]) / (xDomain[1] - xDomain[0]) * 2 - 1;
-    const normalizedWidth = (rangeX + 2 * padX) / (xDomain[1] - xDomain[0]) * 2;
-    const normalizedY = ((yDomain[0] - padY) - yDomain[0]) / (yDomain[1] - yDomain[0]) * 2 - 1;
-    const normalizedHeight = (rangeY + 2 * padY) / (yDomain[1] - yDomain[0]) * 2;
+    const normalizedX = -1 + (2 * padX / rangeX);
+    const normalizedWidth = 2 - (2 * padX / rangeX);
+    const normalizedY = -1 + (2 * padY / rangeY);
+    const normalizedHeight = 2 - (2 * padY / rangeY);
     if (isNaN(normalizedX) || isNaN(normalizedY) || isNaN(normalizedWidth) || isNaN(normalizedHeight)) {
-      console.warn('Invalid zoom bounds:', { normalizedX, normalizedY, normalizedWidth, normalizedHeight });
+      console.warn('Invalid zoom bounds; falling back to reset');
+      scatterplot.reset({ preventEvent: false });
       return;
     }
     scatterplot.zoomToArea({ x: normalizedX, y: normalizedY, width: normalizedWidth, height: normalizedHeight }, true);
+    console.log('Zoom applied successfully');
+  } catch (e) {
+    console.error('Zoom error:', e);
+    scatterplot.reset({ preventEvent: false });
+  }
 };
 
-
+// **9. Updated scatterplotData Handler** (Add manual post-sync)
 Shiny.addCustomMessageHandler('scatterplotData', function(message) {
-  // Clear the container before re-drawing
+  const { data, x_label, y_label, color_by, color_levels, point_size, logScale, metadata, forceRedraw } = message;
+  const points = data || [];
   const container = document.getElementById('scatterplot');
-  container.innerHTML = '';
-
-  const { data, x_label, y_label, color_by, color_levels, point_size, metadata } = message; // Add metadata to destructuring
-  const points = data;
-    
+  if (!container) return;
   const width = container.clientWidth;
   const height = container.clientHeight;
   const margin = { top: 20, right: 20, bottom: 50, left: 60 };
-  
-  const xDomain = d3.extent(points, d => d[0]);
-  const yDomain = d3.extent(points, d => d[1]);
-  
-  const normalizedPoints = points.map(p => [
-      ((p[0] - xDomain[0]) / (xDomain[1] - xDomain[0])) * 2 - 1,
-      ((p[1] - yDomain[0]) / (yDomain[1] - yDomain[0])) * 2 - 1,
-      p[2],
-      p[3]
-  ]);
 
-  const canvas = document.createElement('canvas');
-  canvas.id = 'scatterplotCanvas';
-  canvas.style.position = 'absolute';
-  canvas.style.top = margin.top + 'px';
-  canvas.style.left = margin.left + 'px';
-  canvas.style.width = (width - margin.left - margin.right) + 'px';
-  canvas.style.height = (height - margin.top - margin.bottom) + 'px';
-  container.appendChild(canvas);
-  
-  const svg = d3.select(container).append('svg')
-    .attr('width', width)
-    .attr('height', height)
-    .style('position', 'absolute')
-    .style('top', 0)
-    .style('left', 0)
-    .style('pointer-events', 'none');
-  
-  const xAxis = d3.axisBottom().ticks(6);
-  const xAxisG = svg.append('g').attr('transform', `translate(0, ${height - margin.bottom})`);
-  svg.append('text')
-    .attr('x', margin.left + (width - margin.left - margin.right) / 2)
-    .attr('y', height - 10)
-    .attr('text-anchor', 'middle')
-    .attr('fill', 'black')
-    .text(x_label);
-  
-  const yAxis = d3.axisLeft().ticks(6);
-  const yAxisG = svg.append('g').attr('transform', `translate(${margin.left},0)`);
-  svg.append('text')
-    .attr('transform', 'rotate(-90)')
-    .attr('x', -(margin.top + (height - margin.top - margin.bottom) / 2))
-    .attr('y', 15)
-    .attr('text-anchor', 'middle')
-    .attr('fill', 'black')
-    .text(y_label);
-  
-  svg.selectAll('.domain').attr('stroke', 'black').attr('stroke-width', 1.5);
-  
-  const tooltip = document.createElement('div');
-  tooltip.id = 'scatterplotTooltip';
-  tooltip.style.cssText = `position:absolute;background-color:rgba(0,0,0,0.8);color:white;padding:5px 10px;border-radius:4px;font-size:12px;pointer-events:none;z-index:1000;display:none;`;
-  container.appendChild(tooltip);
+  let xDomain = points.length > 0 ? d3.extent(points, d => d[0]) : [0, 1];
+  let yDomain = points.length > 0 ? d3.extent(points, d => d[1]) : [0, 1];
+  if (xDomain[0] === undefined) xDomain = [0, 1];
+  if (yDomain[0] === undefined) yDomain = [0, 1];
+  if (xDomain.some(isNaN) || yDomain.some(isNaN)) {
+    console.error('Invalid computed domains:', { xDomain, yDomain });
+    xDomain = [0, 1]; yDomain = [0, 1];
+  }
+  const normalizedPoints = normalizePoints(points, xDomain, yDomain, logScale || false);
 
-  import('https://esm.sh/regl-scatterplot@1.14.1').then(module => {
-    const createScatterplot = module.default;
-    const scatterplot = createScatterplot({
-        canvas: canvas,
-        width: width - margin.left - margin.right,
-        height: height - margin.top - margin.bottom,
-        xScale: d3.scaleLinear().domain([-1, 1]).range([0, width - margin.left - margin.right]),
-        yScale: d3.scaleLinear().domain([-1, 1]).range([height - margin.top - margin.bottom, 0]),
-            pointSize: message.point_size // Direct use of the point_size value
-    });
+  const isFullRedraw = !scatterState.scatterplot || forceRedraw || scatterState.originalPoints.length !== points.length;
 
-    const drawOptions = {
-        colorBy: null,
-        sizeBy: null
-    };
-    
-    if (message.color_by !== "None" && message.color_levels && message.color_levels.length > 0) {
-        drawOptions.colorBy = 'valueA';
-        const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
-        const colorMap = colorScale.domain(d3.range(message.color_levels.length)).range();
-        drawOptions.pointColor = colorMap;
-    } else {
-        drawOptions.pointColor = ['#000000'];
-    }
+  try {
+    if (isFullRedraw) {
+      // Full recreation (unchanged, but ensure valid initial axes)
+      container.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      canvas.id = 'scatterplotCanvas';
+      canvas.style.position = 'absolute';
+      canvas.style.top = `${margin.top}px`;
+      canvas.style.left = `${margin.left}px`;
+      canvas.style.width = `${width - margin.left - margin.right}px`;
+      canvas.style.height = `${height - margin.top - margin.bottom}px`;
+      container.appendChild(canvas);
 
-    console.log(drawOptions);
+      const svg = d3.select(container).append('svg')
+        .attr('width', width)
+        .attr('height', height)
+        .style('position', 'absolute')
+        .style('top', 0)
+        .style('left', 0)
+        .style('pointer-events', 'none');
 
-    // We can now remove the sizeBy and pointSizeMap since pointSize is set directly
-    // drawOptions.sizeBy = 'valueB'; // This is no longer needed
-    // const pointSizeMap = d3.scaleLinear() ...
-    // drawOptions.pointSize = [pointSizeMap(message.point_size)]; // Not needed
+      const xAxis = d3.axisBottom().ticks(6);
+      const xAxisG = svg.append('g').attr('transform', `translate(0, ${height - margin.bottom})`);
+      // Initial call with full domain to show ticks
+      const initXScale = d3.scaleLinear().domain(xDomain).range([margin.left, width - margin.right]);
+      xAxis.scale(initXScale);
+      xAxisG.call(xAxis);
 
-    scatterplot.set(drawOptions);
-    scatterplot.draw(normalizedPoints);
-      
-     // Subscribe to events and update the tooltip
-    scatterplot.subscribe('pointOver', pointIndex => {
-        const point = data[pointIndex];
-        const [px, py] = scatterplot.getScreenPosition(pointIndex);
-        
-        // Update tooltip content
-        let tooltipContent = `X: ${point[0].toFixed(2)}<br>Y: ${point[1].toFixed(2)}`;
-        
-        // If metadata exists, add it to the tooltip
-        if (metadata && metadata[pointIndex]) {
+      svg.append('text')
+        .attr('class', 'x-label')
+        .attr('x', margin.left + (width - margin.left - margin.right) / 2)
+        .attr('y', height - 10)
+        .attr('text-anchor', 'middle')
+        .attr('fill', 'black')
+        .text(x_label);
+
+      const yAxis = d3.axisLeft().ticks(6);
+      const yAxisG = svg.append('g').attr('transform', `translate(${margin.left},0)`);
+      // Initial call with full domain
+      const initYScale = d3.scaleLinear().domain(yDomain).range([height - margin.bottom, margin.top]);
+      yAxis.scale(initYScale);
+      yAxisG.call(yAxis);
+
+      svg.append('text')
+        .attr('class', 'y-label')
+        .attr('transform', 'rotate(-90)')
+        .attr('x', -(margin.top + (height - margin.top - margin.bottom) / 2))
+        .attr('y', 15)
+        .attr('text-anchor', 'middle')
+        .attr('fill', 'black')
+        .text(y_label);
+
+      svg.selectAll('.domain').attr('stroke', 'black').attr('stroke-width', 1.5);
+
+      let tooltip = document.getElementById('scatterplotTooltip');
+      if (!tooltip) {
+        tooltip = document.createElement('div');
+        tooltip.id = 'scatterplotTooltip';
+        tooltip.style.cssText = `position:absolute;background-color:rgba(0,0,0,0.8);color:white;padding:5px 10px;border-radius:4px;font-size:12px;pointer-events:none;z-index:1000;display:none;`;
+        container.appendChild(tooltip);
+      }
+
+      import('https://esm.sh/regl-scatterplot@1.14.1').then(module => {
+        const createScatterplot = module.default;
+        const scatterplot = createScatterplot({
+          canvas: canvas,
+          width: width - margin.left - margin.right,
+          height: height - margin.top - margin.bottom,
+          xScale: d3.scaleLinear().domain([-1, 1]).range([0, width - margin.left - margin.right]),  // Note: regl uses normalized scales
+          yScale: d3.scaleLinear().domain([-1, 1]).range([height - margin.top - margin.bottom, 0]),
+          pointSize: point_size || 2
+        });
+
+        let drawOptions = computeDrawOptions(color_by, color_levels);
+        scatterplot.set(drawOptions);
+        scatterplot.draw(normalizedPoints);
+
+        scatterState = { 
+          ...scatterState, 
+          scatterplot, 
+          normalizedPoints, 
+          originalPoints: points,
+          xDomain, 
+          yDomain, 
+          drawOptions,
+          xLabel: x_label,
+          yLabel: y_label,
+          logScale: logScale || false,
+          xAxis,
+          yAxis,
+          xAxisG,
+          yAxisG,
+          viewSubscription: null
+        };
+
+        scatterplot.subscribe('pointOver', pointIndex => {
+          const point = scatterState.originalPoints[pointIndex];
+          const [px, py] = scatterplot.getScreenPosition(pointIndex);
+          let tooltipContent = `X: ${point[0].toFixed(2)}<br>Y: ${point[1].toFixed(2)}`;
+          if (metadata && metadata[pointIndex]) {
             tooltipContent += `<br>Metadata: ${metadata[pointIndex]}`;
+          }
+          tooltip.innerHTML = tooltipContent;
+          tooltip.style.display = 'block';
+          tooltip.style.left = `${px + margin.left + 10}px`;
+          tooltip.style.top = `${py + margin.top + 10}px`;
+        });
+
+        scatterplot.subscribe('pointOut', () => {
+          tooltip.style.display = 'none';
+        });
+
+        scatterplot.subscribe('view', event => {
+          scatterState.currentView = { xScale: event.xScale, yScale: event.yScale };  // FIXED: Store scales
+          updateAxesFromView(event, margin, width, height);
+        });
+
+        setTimeout(() => {
+          if (!scatterState.currentView) {
+            autoAdjustZoom(points, scatterplot, xDomain, yDomain);
+          }
+        }, 100);
+      });
+    } else {
+      // Partial data update (add manual sync post-draw)
+      console.log('Performing transitional data update...');
+      const prevView = scatterState.currentView;
+      const useTransition = points.length === scatterState.originalPoints.length;
+      scatterState.originalPoints = points;
+      scatterState.xDomain = xDomain;
+      scatterState.yDomain = yDomain;
+      const newNormalizedPoints = normalizePoints(points, xDomain, yDomain, logScale || false);
+      scatterState.normalizedPoints = newNormalizedPoints;
+      scatterState.logScale = logScale || false;
+
+      const newDrawOptions = computeDrawOptions(color_by, color_levels);
+      if (JSON.stringify(newDrawOptions) !== JSON.stringify(scatterState.drawOptions)) {
+        scatterState.drawOptions = newDrawOptions;
+        scatterState.scatterplot.set(newDrawOptions);
+      }
+
+      if (point_size !== undefined) {
+        scatterState.scatterplot.set({ pointSize: point_size });
+      }
+
+      d3.select(container).select('.x-label').text(x_label);
+      d3.select(container).select('.y-label').text(y_label);
+
+      let targetXDomain, targetYDomain;
+      if (prevView && useTransition) {
+        const rangeX = xDomain[1] - xDomain[0];
+        const rangeY = yDomain[1] - yDomain[0];
+        targetXDomain = [
+          xDomain[0] + (prevView.xScale.domain()[0] + 1) / 2 * rangeX,
+          xDomain[0] + (prevView.xScale.domain()[1] + 1) / 2 * rangeX
+        ];
+        targetYDomain = [
+          yDomain[0] + (prevView.yScale.domain()[0] + 1) / 2 * rangeY,
+          yDomain[0] + (prevView.yScale.domain()[1] + 1) / 2 * rangeY
+        ];
+        const normX = -1 + 2 * ((targetXDomain[0] - xDomain[0]) / rangeX);
+        const normW = 2 * ((targetXDomain[1] - targetXDomain[0]) / rangeX);
+        const normY = -1 + 2 * ((targetYDomain[0] - yDomain[0]) / rangeY);
+        const normH = 2 * ((targetYDomain[1] - targetYDomain[0]) / rangeY);
+        scatterState.scatterplot.zoomToArea({ x: normX, y: normY, width: normW, height: normH }, false);
+      }
+
+      const drawPromise = scatterState.scatterplot.draw(newNormalizedPoints, { transition: useTransition });
+      if (useTransition) {
+        const stopAnimation = startAnimatedAxesUpdate(scatterState.scatterplot, container, margin, width, height, xDomain, yDomain);
+        drawPromise.then(() => {
+          stopAnimation();
+          if (scatterState.viewSubscription) {
+            const { handler, sub } = scatterState.viewSubscription;
+            if (sub && typeof sub.unsubscribe === 'function') {
+              sub.unsubscribe();
+            } else if (scatterState.scatterplot._pubSub) {
+              scatterState.scatterplot._pubSub.unsubscribe('view', handler);
+            }
+            scatterState.viewSubscription = null;
+          }
+          scatterState.scatterplot.refresh();
+          // NEW: Manual post-sync if no recent view
+          setTimeout(() => {
+            if (scatterState.currentView && !scatterState.currentView.xScale.domain().some(isNaN)) {
+              updateAxesFromView(scatterState.currentView, margin, width, height);
+            } else if (targetXDomain && targetYDomain) {
+              autoAdjustZoom(points, scatterState.scatterplot, targetXDomain, targetYDomain);
+            } else {
+              autoAdjustZoom(points, scatterState.scatterplot, xDomain, yDomain);
+            }
+          }, 50);
+        });
+      } else {
+        drawPromise.then(() => {
+          scatterState.scatterplot.refresh();
+          // NEW: Manual sync
+          setTimeout(() => {
+            if (!prevView) {
+              autoAdjustZoom(points, scatterState.scatterplot, xDomain, yDomain);
+            } else if (targetXDomain && targetYDomain) {
+              autoAdjustZoom(points, scatterState.scatterplot, targetXDomain, targetYDomain);
+            }
+          }, 50);
+        });
+      }
+    }
+  } catch (e) {
+    console.error('Scatterplot update error:', e);
+  }
+});
+
+// **10. Updated updateScatterplotInputs Handler** (Add manual sync for log/color)
+Shiny.addCustomMessageHandler('updateScatterplotInputs', function(message) {
+  if (!scatterState.scatterplot) return;
+
+  const { point_size, logScale, color_by, color_levels, x_label, y_label } = message;
+  const container = document.getElementById('scatterplot');
+  if (!container) return;
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+  const margin = { top: 20, right: 20, bottom: 50, left: 60 };
+  let needsRedraw = false;
+  let needsRefresh = false;
+
+  if (point_size !== undefined) {
+    scatterState.scatterplot.set({ pointSize: point_size });
+    needsRefresh = true;
+  }
+
+  if (color_by !== undefined || color_levels !== undefined) {
+    const newDrawOptions = computeDrawOptions(color_by, color_levels);
+    if (JSON.stringify(newDrawOptions) !== JSON.stringify(scatterState.drawOptions)) {
+      scatterState.drawOptions = newDrawOptions;
+      scatterState.scatterplot.set(newDrawOptions);
+      const prevView = scatterState.currentView;
+      scatterState.scatterplot.draw(scatterState.normalizedPoints, { transition: true, transitionDuration: 200 }).then(() => {
+        const stopAnim = startAnimatedAxesUpdate(scatterState.scatterplot, container, margin, width, height, scatterState.xDomain, scatterState.yDomain);
+        setTimeout(() => {
+          stopAnim();
+          if (scatterState.viewSubscription) {
+            const { handler, sub } = scatterState.viewSubscription;
+            if (sub && typeof sub.unsubscribe === 'function') {
+              sub.unsubscribe();
+            } else if (scatterState.scatterplot._pubSub) {
+              scatterState.scatterplot._pubSub.unsubscribe('view', handler);
+            }
+            scatterState.viewSubscription = null;
+          }
+          scatterState.scatterplot.refresh();
+          // NEW: Manual sync for color transition
+          setTimeout(() => {
+            if (prevView && !prevView.xScale.domain().some(isNaN)) {
+              updateAxesFromView(prevView, margin, width, height);
+            } else {
+              autoAdjustZoom(scatterState.originalPoints, scatterState.scatterplot, scatterState.xDomain, scatterState.yDomain);
+            }
+          }, 50);
+        }, 200);
+      });
+      needsRefresh = true;
+    }
+  }
+
+  if (x_label !== undefined) d3.select(container).select('.x-label')?.text(x_label);
+  if (y_label !== undefined) d3.select(container).select('.y-label')?.text(y_label);
+
+  if (logScale !== undefined && logScale !== scatterState.logScale) {
+    const newNormalizedPoints = normalizePoints(scatterState.originalPoints, scatterState.xDomain, scatterState.yDomain, logScale);
+    scatterState.normalizedPoints = newNormalizedPoints;
+    scatterState.logScale = logScale;
+    needsRedraw = true;
+    const prevView = scatterState.currentView;
+    const drawPromise = scatterState.scatterplot.draw(newNormalizedPoints, { transition: true });
+    const stopAnim = startAnimatedAxesUpdate(scatterState.scatterplot, container, margin, width, height, scatterState.xDomain, scatterState.yDomain);
+    drawPromise.then(() => {
+      stopAnim();
+      if (scatterState.viewSubscription) {
+        const { handler, sub } = scatterState.viewSubscription;
+        if (sub && typeof sub.unsubscribe === 'function') {
+          sub.unsubscribe();
+        } else if (scatterState.scatterplot._pubSub) {
+          scatterState.scatterplot._pubSub.unsubscribe('view', handler);
         }
-        
-        tooltip.innerHTML = tooltipContent;
-        tooltip.style.display = 'block';
-        tooltip.style.left = (px + margin.left + 10) + 'px';
-        tooltip.style.top = (py + margin.top + 10) + 'px';
+        scatterState.viewSubscription = null;
+      }
+      scatterState.scatterplot.refresh();
+      // NEW: Manual sync for log toggle
+      setTimeout(() => {
+        if (prevView && !prevView.xScale.domain().some(isNaN)) {
+          updateAxesFromView(prevView, margin, width, height);
+        } else {
+          autoAdjustZoom(scatterState.originalPoints, scatterState.scatterplot, scatterState.xDomain, scatterState.yDomain);
+        }
+      }, 50);
     });
+  }
 
-    scatterplot.subscribe('pointOut', () => {
-    tooltip.style.display = 'none';
-    });
-
-    scatterplot.subscribe('view', event => {
-    const newXDomain = [
-        xDomain[0] + (event.xScale.domain()[0] + 1) / 2 * (xDomain[1] - xDomain[0]),
-        xDomain[0] + (event.xScale.domain()[1] + 1) / 2 * (xDomain[1] - xDomain[0])
-    ];
-    const newYDomain = [
-        yDomain[0] + (event.yScale.domain()[0] + 1) / 2 * (yDomain[1] - yDomain[0]),
-        yDomain[0] + (event.yScale.domain()[1] + 1) / 2 * (yDomain[1] - yDomain[0])
-    ];
-
-    const newXScale = d3.scaleLinear().domain(newXDomain).range([margin.left, width - margin.right]);
-    const newYScale = d3.scaleLinear().domain(newYDomain).range([height - margin.bottom, margin.top]);
-
-    xAxis.scale(newXScale);
-    yAxis.scale(newYScale);
-
-    xAxisG.call(xAxis);
-    yAxisG.call(yAxis);
-    });
-
-    setTimeout(() => {
-    autoAdjustZoom(points, scatterplot, xDomain, yDomain);
-    }, 100);
-  });
+  if (needsRefresh && !needsRedraw) {
+    scatterState.scatterplot.refresh();
+    // Quick sync for size-only changes
+    setTimeout(() => updateAxesFromView(scatterState.currentView || { xScale: d3.scaleLinear().domain([-1,1]), yScale: d3.scaleLinear().domain([-1,1]) }, margin, width, height), 0);
+  }
 });

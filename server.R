@@ -55,9 +55,9 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-use_condaenv("sc_rna_env_python2", required = TRUE)
+# use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-# use_condaenv("shiny_app_env", required = TRUE)
+use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
@@ -1018,7 +1018,8 @@ process_gene_names <- function(ad_obj) {
 #' @param use_layer Character, which expression layer to use
 #' @param use_cache Whether to use expression cache
 #' @return List with encoded expression data and statistics
-extract_gene_data_enhanced <- function(gene_names, lazy_data, use_layer = "X", use_cache = TRUE) {
+extract_gene_data_enhanced <- function(gene_names, lazy_data, use_layer = "X", use_cache = TRUE,
+                                       only_vector = FALSE) {
   if (length(gene_names) == 0) {
     return(list(
       genes = character(0),
@@ -1097,6 +1098,11 @@ extract_gene_data_enhanced <- function(gene_names, lazy_data, use_layer = "X", u
 
     # Encode main expression matrix
     gene_data_vector <- as.vector(expr_matrix)
+
+    if (only_vector) {
+      return(gene_data_vector)
+    }
+
     encoded_data <- base64enc::base64encode(writeBin(as.numeric(gene_data_vector), raw()))
     cat("💾 Encoded data size:", nchar(encoded_data), "characters\n")
     cat("💾 MAGIC data size:", nchar(magic_data), "characters\n")
@@ -1557,6 +1563,9 @@ server <- function(input, output, session) {
         sendTime = send_time_js,      # JavaScript-compatible timestamp
         timingId = timing_id          # Unique ID for tracking
       ))
+
+      # Set in plot storage that canvas exists
+      plot_storage$canvases <- list(main = TRUE)
       
       t8 <- Sys.time()
       cat("⏱ sendCustomMessage preparation took:", 
@@ -1738,6 +1747,14 @@ server <- function(input, output, session) {
         genes = gene_list,
         expression_data = gene_data
       ))
+
+      # Keep 'main', clear the rest
+      plot_storage$canvases <- plot_storage$canvases["main"]
+
+      # Update with current gene_list
+      for (gene in gene_list) {
+        plot_storage$canvases[[gene]] <- TRUE
+      }
       
       # Update status with strategy info
       strategy_info <- if(values$lazy_data$is_zarr) "(truly lazy)" else "(selective)"
@@ -2443,53 +2460,80 @@ server <- function(input, output, session) {
     list(mat = mat, group_info = group_info)
   }
 
-  # Render Panel 1 heatmap
+  # Panel 1
   heatmapPlot1_obj <- reactive({
     req(heatmap_data_panel1())
-    library(ComplexHeatmap)
     data <- heatmap_data_panel1()
-    p <- render_heatmap(data, "")
+    p <- render_heatmap(data, NULL)
     plot_storage$heatmap1 <- p
     p
   })
-  output$heatmapPlot1 <- renderPlot({
-    req(heatmapPlot1_obj())
-    heatmapPlot1_obj()
-  })
 
+  output$heatmapPlot1 <- renderPlot(
+    {
+      req(heatmapPlot1_obj())
+      heatmapPlot1_obj()
+    },
+    height = function() {
+      n_rows <- nrow(heatmap_data_panel1()$mat)
+      calc_heatmap_height(n_rows)$px  # <-- use px
+    }
+  )
 
-  # Render Panel 2 heatmap
-  output$heatmapPlot2 <- renderPlot({
-    req(heatmap_data_panel2())
-    library(ComplexHeatmap)
-    data <- heatmap_data_panel2()
-    p <- render_heatmap(data, "")
-    plot_storage$heatmap2 <- p
-    p
-  })
+  # Panel 2
+  output$heatmapPlot2 <- renderPlot(
+    {
+      req(heatmap_data_panel2())
+      data <- heatmap_data_panel2()
+      p <- render_heatmap(data, NULL)
+      plot_storage$heatmap2 <- p
+      p
+    },
+    height = function() {
+      n_rows <- nrow(heatmap_data_panel2()$mat)
+      calc_heatmap_height(n_rows)$px
+    }
+  )
 
-  # Helper function to render heatmap
+  calc_heatmap_height <- function(n_rows, row_cm = 0.5, row_px = 20,
+                                  min_cm = 6, max_cm = 40,
+                                  min_px = 300, max_px = 2000) {
+    list(
+      cm = max(min(n_rows * row_cm, max_cm), min_cm),
+      px = max(min(n_rows * row_px, max_px), min_px)
+    )
+  }
+
+  calc_heatmap_size <- function(n_rows, n_cols,
+                                row_cm = 0.5, col_cm = 0.3,
+                                min_cm = 6, max_cm = 40,
+                                min_w = 6, max_w = 50) {
+    list(
+      height_cm = max(min(n_rows * row_cm, max_cm), min_cm),
+      width_cm  = max(min(n_cols * col_cm, max_w), min_w)
+    )
+  }
+
   render_heatmap <- function(data, title) {
     mat <- data$mat
-    
+    n_rows <- nrow(mat)
+    n_cols <- ncol(mat)
+    sz <- calc_heatmap_size(n_rows, n_cols)
+
+    library(ComplexHeatmap)
+    library(RColorBrewer)
+
     if (!is.null(data$group_info)) {
       groups <- levels(data$group_info)
-      library(RColorBrewer)
-
-      # Base palette (Set1 has up to 9 distinct colors)
       max_colors <- 9
       base_pal <- brewer.pal(max_colors, "Set1")
-
-      # Suppose groups is your vector of category names
       n <- length(groups)
 
-      # If more than 9 groups, extend colors using colorRampPalette
       pal_colors <- if (n <= max_colors) {
         base_pal[1:n]
       } else {
         colorRampPalette(base_pal)(n)
       }
-
       pal <- setNames(pal_colors, groups)
 
       ha <- HeatmapAnnotation(
@@ -2498,7 +2542,7 @@ server <- function(input, output, session) {
         show_annotation_name = FALSE
       )
 
-      Heatmap(
+      ht <- Heatmap(
         mat,
         name = "expression",
         top_annotation = ha,
@@ -2514,7 +2558,7 @@ server <- function(input, output, session) {
         row_names_gp = gpar(fontsize = 10)
       )
     } else {
-      Heatmap(
+      ht <- Heatmap(
         mat,
         name = "expression",
         cluster_rows = TRUE,
@@ -2527,7 +2571,13 @@ server <- function(input, output, session) {
         row_names_gp = gpar(fontsize = 10)
       )
     }
+
+    # Only fix width, let Shiny control height
+    draw(ht, heatmap_width = unit(sz$width_cm, "cm"))
   }
+
+
+
 
 
   # Gene Tab
@@ -2762,40 +2812,73 @@ server <- function(input, output, session) {
   })
 
 
-  # MODIFIED qc_main_data reactive
+  # MODIFIED qc_main_data reactive (with robust length matching)
   qc_main_data <- reactive({
       req(values$lazy_data, input$qc_plot_type)
+      
+      n_obs <- nrow(values$lazy_data$df)
 
       if (input$qc_plot_type == "scatter") {
-          req(input$qc_x_metric, input$qc_y_metric)
+          req(input$qc_x_metric, input$qc_y_metric, n_obs > 0)  # Guard against empty data
 
-          x <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_x_metric))
-          y <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_y_metric))
+          x <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_x_metric)
+          y <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_y_metric)
 
-          color_vals <- rep(0, length(x))
+          if (is.null(x) || length(x) != n_obs) x <- rep(NA_real_, n_obs)
+          if (is.null(y) || length(y) != n_obs) y <- rep(NA_real_, n_obs)
 
+          x <- as.numeric(x)
+          y <- as.numeric(y)
+
+          # Group
+          group <- NULL
+          if (!is.null(input$qc_group_by) && input$qc_group_by != "None") {
+            group <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by)
+          }
+          if (is.null(group) || length(group) != n_obs) {
+            group <- rep(NA_character_, n_obs)
+          }
+          group <- as.factor(group)
+
+          # Color
+          color_vals <- rep(0L, n_obs)
           if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
-              color_factors <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by))
-              color_vals <- as.integer(color_factors) - 1
-          }
-          
-          # New: Get metadata from the new reactive expression
-          metadata_vals <- qc_metadata_data()
-          
-          # Check if metadata was found and if it has the right length.
-          # If not, create a vector of empty strings with the correct length.
-          if (is.null(metadata_vals) || length(metadata_vals) != length(x)) {
-              metadata_vals <- rep("", length(x))
+            color_factors <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by)
+            if (!is.null(color_factors) && length(color_factors) == n_obs) {
+              color_vals <- as.integer(as.factor(color_factors)) - 1L
+            }
           }
 
-          return(data.frame(X = x, Y = y, Color = color_vals, Metadata = metadata_vals))
+          # Metadata
+          metadata_vals <- qc_metadata_data()
+          if (is.null(metadata_vals) || length(metadata_vals) != n_obs) {
+            metadata_vals <- rep("", n_obs)
+          }
+
+          df <- data.frame(
+            X = x,
+            Y = y,
+            Color = color_vals,
+            Metadata = metadata_vals,
+            Group = group,
+            stringsAsFactors = FALSE
+          )
+          return(df)
 
       } else if (input$qc_plot_type == "violin") {
-          req(input$qc_metric, input$qc_group_by)
+          req(input$qc_metric, input$qc_group_by, n_obs > 0)
           metric <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_metric))
           group <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by))
-          return(data.frame(Metric = metric, Group = group))
+          
+          if (length(metric) != length(group)) {
+              stop("Row length mismatch in violin data")
+          }
+          
+          return(data.frame(Metric = metric, Group = group, stringsAsFactors = FALSE))
       }
+      
+      # Fallback for invalid type
+      return(data.frame())
   })
 
 
@@ -2833,59 +2916,62 @@ server <- function(input, output, session) {
       dat <- qc_main_data()
 
       if (input$qc_plot_type == "violin") {
-          # Prepare and send data for the violin plot
-          datasets <- lapply(unique(dat$Group), function(g) {
-              group_data <- dat[dat$Group == g, ]
-              list(
-                  values = group_data$Metric,
-                  metadata = list(name = g, n = nrow(group_data))
-              )
-          })
-          
-          message_to_send <- c(
-              list(datasets = datasets),
-              list(
-                  showPoints = input$qc_show_points,
-                  logScale = input$qc_log_scale,
-                  pointSize = input$qc_point_size,
-                  legendPosition = input$qc_legend_position
-              )
-          )
-          
-          session$sendCustomMessage("drawViolins", message_to_send)
+        # Prepare and send data for the violin plot
+        datasets <- lapply(unique(dat$Group), function(g) {
+            group_data <- dat[dat$Group == g, ]
+            list(
+                values = group_data$Metric,
+                metadata = list(name = g, n = nrow(group_data))
+            )
+        })
+        
+        message_to_send <- c(
+            list(datasets = datasets),
+            list(
+                showPoints = input$qc_show_points,
+                logScale = input$qc_log_scale,
+                pointSize = input$qc_point_size,
+                legendPosition = input$qc_legend_position
+            )
+        )
+        
+        session$sendCustomMessage("drawViolins", message_to_send)
+        plot_storage$qc_main <- TRUE
 
       } else if (input$qc_plot_type == "scatter") {
-          # Prepare and send data for the scatterplot
-          scatterplot_matrix <- as.matrix(dat[, c("X", "Y", "Color")])
-          
-          # New: Get color levels and metadata directly here, after `req`
-          color_levels <- NULL
-          metadata_vals <- NULL
-          
-          # Check if the color_by variable exists and is not "None"
-          if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
-              # This is now safe because dat (from qc_main_data) is ready
-              color_levels <- levels(as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by)))
-          }
+        # Prepare and send data for the scatterplot
+        scatterplot_matrix <- as.matrix(dat[, c("X", "Y", "Color")])
+        
+        # New: Get color levels and metadata directly here, after `req`
+        color_levels <- NULL
+        metadata_vals <- NULL
+        
+        # Check if the color_by variable exists and is not "None"
+        if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
+            # This is now safe because dat (from qc_main_data) is ready
+            color_levels <- levels(as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by)))
+        }
 
-          # Retrieve metadata directly here
-          metadata_vars <- c("celltype", "Annotation")
-          for (var in metadata_vars) {
-              if (var %in% categorical_vars()) { # Your fix is now safe to use here
-                  metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var))
-                  break
-              }
-          }
-          
-          session$sendCustomMessage("scatterplotData", list(
-              data = scatterplot_matrix,
-              x_label = input$qc_x_metric,
-              y_label = input$qc_y_metric,
-              color_by = input$qc_color_by,
-              color_levels = color_levels,
-              point_size = input$qc_point_size,
-              metadata = metadata_vals
-          ))
+        # Retrieve metadata directly here
+        metadata_vars <- c("celltype", "Annotation")
+        for (var in metadata_vars) {
+            if (var %in% categorical_vars()) { # Your fix is now safe to use here
+                metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var))
+                break
+            }
+        }
+        
+        session$sendCustomMessage("scatterplotData", list(
+            data = scatterplot_matrix,
+            x_label = input$qc_x_metric,
+            y_label = input$qc_y_metric,
+            color_by = input$qc_color_by,
+            color_levels = color_levels,
+            point_size = input$qc_point_size,
+            metadata = metadata_vals
+        ))
+
+        plot_storage$qc_main <- TRUE
       }
   })
 
@@ -3093,22 +3179,22 @@ server <- function(input, output, session) {
     showModal(modalDialog(
       id = "report_modal",
       title = "Generating Report...",
-      "Capturing dynamic plots. Please wait...",
+      "Preparing plot data. Please wait...",
       footer = NULL,
       easyClose = FALSE
     ))
 
-    # Reset the status and trigger the canvas capture
+    # Reset the status and trigger the canvas capture (fallback; can remove if unneeded)
     report_generation_status("capturing")
-    print("Triggering canvas capture for report...")
+    print("Triggering canvas capture for report (fallback)...")
     session$sendCustomMessage("captureCanvases", list(debug = "modal_trigger"))
   })
 
-  # Observe canvas data sent from JavaScript
+  # Observe canvas data sent from JavaScript (fallback; can remove if unneeded)
   observeEvent(input$canvas_data, {
     # This event will now update the plot_storage and the status
     print("Received canvas_data from JavaScript")
-    plot_storage$canvases <- input$canvas_data
+    # plot_storage$canvases <- input$canvas_data
     print("Updated plot_storage$canvases")
 
     # Set the status to "ready" once the canvas data is received
@@ -3135,10 +3221,10 @@ server <- function(input, output, session) {
 
         # The downloadHandler now executes only AFTER the canvas data is ready.
         # The waiting logic is no longer needed here.
-        if (is.null(plot_storage$canvases) || length(plot_storage$canvases) == 0) {
-          showNotification("Error: Canvas images were not captured.", type = "error")
-          return()
-        }
+        # if (is.null(plot_storage$canvases) || length(plot_storage$canvases) == 0) {
+        #   showNotification("Error: Canvas images were not captured.", type = "error")
+        #   return()
+        # }
 
         # Create temporary directory for plots
         temp_dir <- file.path(tempdir(), "plots")
@@ -3156,25 +3242,110 @@ server <- function(input, output, session) {
           dev.off()
           saved_plots$heatmap1 <- hm1_file
         }
+
+        if (!is.null(plot_storage$heatmap2)) {
+          hm2_file <- file.path(plot_dir, "heatmap2.png")
+          png(hm2_file, width = 10, height = 6, units = "in", res = 300)
+          draw(plot_storage$heatmap2)
+          dev.off()
+          saved_plots$heatmap2 <- hm2_file
+        }
+
+        for (gene in displayed_genes$genes) {
+          gene_plot <- plot_storage[[paste0("gene_", gene)]]
+          if (!is.null(gene_plot)) {
+            gene_file <- file.path(plot_dir, paste0("gene_", gene, ".png"))
+            ggsave(gene_file, plot = gene_plot, width = 8, height = 4, dpi = 300)
+            saved_plots[[paste0("gene_", gene)]] <- gene_file
+          }
+        }
+
+
+        # qc_main plot saving (if applicable)
+        qc_plot_data <- NULL
+
+        if (!is.null(plot_storage$qc_main) && !is.null(qc_main_data())) {
+          qc_plot_type <- input$qc_plot_type
+
+          dat <- qc_main_data()
+          if (qc_plot_type == "violin") {
+            # change dat column names
+            colnames(dat) <- c(input$qc_metric, input$qc_group_by)
+            print(head(dat))
+            qc_plot_data <- list(
+              data = as.data.frame(dat)
+            )
+
+          } else if (qc_plot_type == "scatter") {
+
+            colnames(dat) <- c("X", "Y", "Color", "Metadata", input$qc_group_by)
+
+            qc_plot_data <- list(
+              data = as.data.frame(dat),
+              color_by = input$qc_color_by
+            )
+          }
+          saved_plots$qc_main <- TRUE  # Indicate that QC plot data is available
+        }
         
-        # Save canvas images
-        if (length(plot_storage$canvases) > 0) {
-          print(paste("Saving", length(plot_storage$canvases), "canvas images..."))
-          for (canvas_id in names(plot_storage$canvases)) {
-            print(paste("Processing canvas:", canvas_id))
-            data_url <- plot_storage$canvases[[canvas_id]]
-            if (!is.null(data_url) && nchar(data_url) > 1000) {
-              img_data <- sub("^data:image/(png|jpeg);base64,", "", data_url)
-              img_file <- file.path(plot_dir, paste0(canvas_id, ".jpg"))
-              writeBin(base64enc::base64decode(img_data), img_file)
-              saved_plots[[canvas_id]] <- img_file
-              print(paste("Saved canvas image with legend:", img_file))
-            } else {
-              print(paste("Invalid or empty data URL for canvas:", canvas_id))
+        all_scatter_data <- list()
+        print("Preparing scatter data for report...")
+        if (!is.null(values) && !is.null(values$lazy_data) && !is.null(values$lazy_data$df)) {
+          print("Lazy data and df found")
+          df <- values$lazy_data$df
+          if ("x" %in% colnames(df) && "y" %in% colnames(df)) {
+            
+            n_obs <- nrow(df)
+
+            # Annotations for main plot
+            annotations <- NULL
+            if (!is.null(input$colorBy) && !is.null(values$lazy_data$z)) {
+              annotations <- values$lazy_data$get_obs_column(values$lazy_data$z, input$colorBy)
             }
+            # Fallback or fix length mismatch
+            if (is.null(annotations) || length(annotations) != n_obs) {
+              annotations <- rep("default", n_obs)
+            }
+
+            main_data <- data.frame(
+              x = df$x,
+              y = df$y,
+              annotations = annotations,
+              stringsAsFactors = FALSE
+            )
+            all_scatter_data[['main']] <- main_data
+            print(paste("Prepared main scatter data with", nrow(main_data), "rows"))
+
+            # Gene plots
+            gene_keys <- names(plot_storage$canvases)[names(plot_storage$canvases) != "main"]
+            if (length(gene_keys) > 0) {
+              for (gene in gene_keys) {
+                if (!is.null(plot_storage$canvases[[gene]])) {
+                  gene_annotations <- extract_gene_data_enhanced(gene, values$lazy_data, only_vector = TRUE)
+
+                  # Force correct length
+                  if (is.null(gene_annotations) || length(gene_annotations) != n_obs) {
+                    gene_annotations <- rep(NA, n_obs)
+                  }
+
+                  gene_data <- data.frame(
+                    x = df$x,
+                    y = df$y,
+                    annotations = gene_annotations,
+                    stringsAsFactors = FALSE
+                  )
+                  all_scatter_data[[gene]] <- gene_data
+                  print(paste("Prepared gene scatter data for", gene, "with", nrow(gene_data), "rows"))
+                }
+              }
+            } else {
+              print("No gene plots found in plot_storage$canvases")
+            }
+          } else {
+            print("Warning: 'x' or 'y' columns missing in lazy_data$df")
           }
         } else {
-          print("No canvas images to save.")
+          print("Warning: values$lazy_data or df is null")
         }
 
         # Reset status for the next run
@@ -3184,15 +3355,17 @@ server <- function(input, output, session) {
         tempReport <- file.path(temp_dir, "report_template.Rmd")
         file.copy("report_template.Rmd", tempReport, overwrite = TRUE)
 
-        # Prepare parameters
+        # Prepare parameters (now includes scatter_data instead of canvases)
         params <- list(
           app_data = list(
             saved_plots = saved_plots,
-            canvas_info = plot_storage$canvases,
+            # canvas_info = plot_storage$canvases,  # No longer needed
             violin_genes = displayed_genes$genes,
             timestamp = Sys.time(),
             user_inputs = reactiveValuesToList(input),
-            plot_dir = plot_dir
+            plot_dir = plot_dir,
+            scatter_data = all_scatter_data,  # NEW: Pass data for recreating scatterplot in Rmd
+            qc_plot_data = qc_plot_data  # NEW: Pass data for recreating QC plot in Rmd
           )
         )
 
@@ -3208,13 +3381,13 @@ server <- function(input, output, session) {
       })
     }
   )
-  
+
   plot_storage <- reactiveValues(
     heatmap1 = NULL,
     heatmap2 = NULL,
     gene_main = NULL,
     qc_main = NULL,
-    canvases = list()
+    canvases = list()  # Keep for fallback if needed
   )
 
 }

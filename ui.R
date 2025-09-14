@@ -121,8 +121,8 @@ ui <- fluidPage(
         }
 
         .gene-plots {
-          max-height: 600px;  /* Adjust as needed */
-          overflow-y: auto;   /* Enable vertical scrolling */
+          # max-height: 600px;  /* Adjust as needed */
+          # overflow-y: auto;   /* Enable vertical scrolling */
           padding: 10px;
         }
     "))
@@ -573,7 +573,7 @@ ui <- fluidPage(
             # First heatmap
             div(class = "gene-plots",
               h4("Panel 1: Genes Heatmap"),
-              plotOutput("heatmapPlot1", height = "400px")
+              plotOutput("heatmapPlot1", height = "auto")
             ),
 
             # Add some spacing between panels
@@ -582,7 +582,7 @@ ui <- fluidPage(
             # Second heatmap
             div(class = "gene-plots",
               h4("Panel 2: Pathways/Gene Sets Heatmap"),
-              plotOutput("heatmapPlot2", height = "400px")
+              plotOutput("heatmapPlot2", height = "auto")
             )
           )
         ),
