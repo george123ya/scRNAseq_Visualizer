@@ -400,7 +400,7 @@ process_zarr_data_fast <- function(z, file_path) {
   get_obsm_fast <- function(key) {
     if (!(key %in% obsm_keys)) return(NULL)
     tryCatch({
-      return(py_to_r(z$obsm[[key]][]))
+      return(py_to_r(z[['obsm']][[key]][]))
     }, error = function(e) {
       cat("⚠️ Error loading obsm", key, ":", e$message, "\n")
       return(NULL)
