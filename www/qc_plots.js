@@ -337,7 +337,27 @@ function updatePlot() {
             allSorted.forEach((sorted, i) => {
                 if (counters[i]) {
                     const count = d3.bisectLeft(sorted, yVal);
-                    counters[i].text(`n=${count}`).style('display', null);
+                    const pct = (count / sorted.length) * 100;
+
+                    // Clear any previous tspans
+                    counters[i].selectAll("tspan").remove();
+
+                    // First line (count)
+                    counters[i]
+                        .append("tspan")
+                        .attr("x", margin.left + plotWidth * (i + 0.5))
+                        .attr("text-anchor", "middle")
+                        .text(`n=${count}`);
+
+                    // Second line (percentage)
+                    counters[i]
+                        .append("tspan")
+                        .attr("x", margin.left + plotWidth * (i + 0.5))
+                        .attr("dy", 12) // move down relative to previous line
+                        .attr("text-anchor", "middle")
+                        .text(`(${pct.toFixed(1)}%)`);
+
+                    counters[i].style("display", null);
                 }
             });
             Shiny.setInputValue('hover_count', { count: totalCount, value: yVal }, {priority: 'event'});

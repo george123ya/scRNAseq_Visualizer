@@ -56,50 +56,40 @@ if(!is.null(user_inputs$heatmap_genes_panel1)) {
   cat("**Reproducible Code:**\n\n")
   cat("```r\n")
   cat("# Load required libraries\n")
-  cat("library(zarr)\n")
-  cat("library(reticulate)\n")
+  cat("source('https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R?raw=true')\n")
   cat("library(ComplexHeatmap)\n")
   cat("library(circlize)\n\n")
   
-  cat("# Load analysis functions\n")
-  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
-  
   cat("# Initialize zarr data connection\n")
-  cat("zarr_path <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'\n")
-  cat("zarr_root <- zarr$open_group(zarr_path, mode='r')\n\n")
+  cat(sprintf("zarr_file <- '%s'\n", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr")))
+  cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
   
-  cat("# Retrieve genes from zarr\n")
+  cat("# Process input genes\n")
   genes_clean <- trimws(unlist(strsplit(user_inputs$heatmap_genes_panel1, ",|\\s+")))
   genes_clean <- genes_clean[genes_clean != "" & !is.na(genes_clean)]
-  cat("requested_genes <- c(", paste(paste0("\"", genes_clean, "\""), collapse = ", "), ")\n")
-  cat("available_genes <- zarr_root$var$index$values\n")
-  cat("genes <- requested_genes[toupper(requested_genes) %in% toupper(available_genes)]\n\n")
+  cat(sprintf("genes <- c(%s)\n", paste(dQuote(toupper(genes_clean)), collapse = ", ")))
+  cat("genes <- genes[genes %in% toupper(lazy_data$genes)]\n\n")
   
-  cat("# Extract expression matrix from zarr\n")
-  cat("expr_indices <- match(toupper(genes), toupper(available_genes))\n")
-  cat("expr_matrix <- zarr_root$X[, expr_indices]\n")
-  cat("colnames(expr_matrix) <- genes\n\n")
+  cat("# Extract expression data\n")
+  cat("expr_mat <- lazy_data$get_genes_expression_batch(genes, layer='X')\n")
+  cat("if(is.null(expr_mat)) {\n")
+  cat("  mat <- matrix(NA, nrow=lazy_data$n_cells, ncol=length(genes))\n")
+  cat("  colnames(mat) <- genes\n")
+  cat("} else {\n")
+  cat("  mat <- expr_mat\n")
+  cat("}\n\n")
   
-  cat("# Get cell metadata from zarr\n")
-  cat("cell_metadata <- data.frame(\n")
-  cat("  cell_id = zarr_root$obs$index$values\n")
-  if(!is.null(user_inputs$heatmap_cluster_by_panel1) && user_inputs$heatmap_cluster_by_panel1 != "") {
-    cat(",\n  cluster = zarr_root$obs$", user_inputs$heatmap_cluster_by_panel1, "$values\n")
-  }
-  cat(")\n\n")
-  
-  cat("# Process heatmap data using zarr-retrieved information\n")
+  cat("# Process heatmap data\n")
   cat("heatmap_data <- process_heatmap_data(\n")
-  cat("  expr_matrix = expr_matrix,\n")
-  cat("  cell_metadata = cell_metadata,\n")
-  cat("  score_type = '", user_inputs$heatmap_score_panel1, "',\n")
-  cat("  cell_group_mode = '", user_inputs$heatmap_cell_group_mode_panel1, "',\n")
-  cat("  cluster_by = '", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "", user_inputs$heatmap_cluster_by_panel1), "'\n")
+  cat("  mat = mat,\n")
+  cat(sprintf("  score_type = '%s',\n", user_inputs$heatmap_score_panel1))
+  cat(sprintf("  cell_group_mode = '%s',\n", user_inputs$heatmap_cell_group_mode_panel1))
+  cat(sprintf("  cluster_by = '%s'\n", ifelse(is.null(user_inputs$heatmap_cluster_by_panel1), "", user_inputs$heatmap_cluster_by_panel1)))
   cat(")\n\n")
   
-  cat("# Generate heatmap (using data from R params for actual plotting)\n")
-  cat("# Note: The heatmap is plotted using pre-computed data from the Shiny app\n")
-  cat("# but the zarr retrieval code above shows how to reproduce the analysis\n")
+  cat("# Generate heatmap\n")
+  cat("heatmap_plot <- render_heatmap(heatmap_data, NULL)\n")
+  cat("print(heatmap_plot)\n")
   cat("```\n\n")
   
   cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
@@ -135,38 +125,30 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
   cat("**Reproducible Code:**\n\n")
   cat("```r\n")
   cat("# Load required libraries\n")
-  cat("library(zarr)\n")
-  cat("library(reticulate)\n")
+  cat("source('https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R?raw=true')\n")
   cat("library(ComplexHeatmap)\n\n")
   
-  cat("# Load analysis functions\n")
-  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
-  
   cat("# Initialize zarr data connection\n")
-  cat("zarr_path <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'\n")
-  cat("zarr_root <- zarr$open_group(zarr_path, mode='r')\n\n")
+  cat(sprintf("zarr_file <- '%s'\n", ifelse(grepl('^https?://', user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr")))
+  cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
   
-  cat("# Retrieve gene lists and metadata from zarr\n")
-  cat("available_genes <- zarr_root$var$index$values\n")
+  cat("# Retrieve gene lists and metadata\n")
+  cat("available_genes <- lazy_data$genes\n")
   cat("cell_metadata <- data.frame(\n")
-  cat("  cell_id = zarr_root$obs$index$values\n")
+  cat("  cell_id = lazy_data$get_obs_column(lazy_data$z, 'index')\n")
   if(!is.null(user_inputs$heatmap_cluster_by_panel2) && user_inputs$heatmap_cluster_by_panel2 != "") {
-    cat(",\n  cluster = zarr_root$obs$", user_inputs$heatmap_cluster_by_panel2, "$values\n")
+    cat(sprintf(",\n  cluster = lazy_data$get_obs_column(lazy_data$z, '%s')\n", user_inputs$heatmap_cluster_by_panel2))
   }
   cat(")\n\n")
   
   if(user_inputs$heatmap_gene_group_mode_panel2 == "pathways") {
-    cat("# Load pathway data from zarr\n")
-    cat("if('uns' %in% names(zarr_root) && 'pathways' %in% names(zarr_root$uns)) {\n")
-    cat("  pathway_data <- zarr_root$uns$pathways\n")
-    cat("} else {\n")
-    cat("  # Load from external source or define manually\n")
-    cat("  pathway_data <- load_pathway_database()\n")
-    cat("}\n")
+    cat("# Load pathway data\n")
+    cat("pathway_data <- load_pathway_database()\n")
     if("ALL" %in% user_inputs$heatmap_pathway_select_panel2) {
       cat("gene_groups <- pathway_data  # All pathways selected\n")
     } else {
-      cat("selected_pathways <- c(", paste(paste0("\"", user_inputs$heatmap_pathway_select_panel2, "\""), collapse=","), ")\n")
+      cat(sprintf("selected_pathways <- c(%s)\n",
+                  paste(dQuote(user_inputs$heatmap_pathway_select_panel2), collapse = ", ")))
       cat("gene_groups <- pathway_data[selected_pathways]\n")
     }
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "custom_gmt") {
@@ -175,7 +157,8 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
     if("ALL" %in% user_inputs$heatmap_gmt_sets_panel2) {
       cat("gene_groups <- gmt_data  # All GMT gene sets selected\n")
     } else {
-      cat("selected_gmt <- c(", paste(paste0("\"", user_inputs$heatmap_gmt_sets_panel2, "\""), collapse=","), ")\n")
+      cat(sprintf("selected_gmt <- c(%s)\n",
+                  paste(dQuote(user_inputs$heatmap_gmt_sets_panel2), collapse = ", ")))
       cat("gene_groups <- gmt_data[selected_gmt]\n")
     }
   } else if(user_inputs$heatmap_gene_group_mode_panel2 == "manual") {
@@ -183,7 +166,8 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
     cat("gene_groups <- list(\n")
     if(!is.null(user_inputs$selected_manual_genesets)) {
       for(i in seq_along(user_inputs$selected_manual_genesets)) {
-        cat("  \"", user_inputs$selected_manual_genesets[i], "\" = c(\"GENE1\", \"GENE2\", \"GENE3\")")
+        cat(sprintf("  %s = c(\"GENE1\", \"GENE2\", \"GENE3\")",
+                    dQuote(user_inputs$selected_manual_genesets[i])))
         if(i < length(user_inputs$selected_manual_genesets)) cat(",")
         cat("\n")
       }
@@ -191,26 +175,25 @@ if(!is.null(user_inputs$heatmap_gene_group_mode_panel2)) {
     cat(")\n")
   }
   
-  cat("\n# Extract expression data from zarr for gene sets\n")
+  cat("\n# Extract expression data for gene sets\n")
   cat("expr_data_list <- lapply(gene_groups, function(genes) {\n")
   cat("  valid_genes <- genes[toupper(genes) %in% toupper(available_genes)]\n")
   cat("  if(length(valid_genes) == 0) return(NULL)\n")
-  cat("  gene_indices <- match(toupper(valid_genes), toupper(available_genes))\n")
-  cat("  zarr_root$X[, gene_indices, drop=FALSE]\n")
+  cat("  lazy_data$get_genes_expression_batch(valid_genes, layer='X')\n")
   cat("})\n\n")
   
   cat("# Calculate gene set scores and create heatmap\n")
   cat("heatmap_data <- calculate_geneset_scores(\n")
   cat("  expr_data_list = expr_data_list,\n")
   cat("  cell_metadata = cell_metadata,\n")
-  cat("  score_type = '", user_inputs$heatmap_score_panel2, "',\n")
-  cat("  cell_group_mode = '", user_inputs$heatmap_cell_group_mode_panel2, "',\n")
-  cat("  cluster_by = '", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "", user_inputs$heatmap_cluster_by_panel2), "'\n")
+  cat(sprintf("  score_type = '%s',\n", user_inputs$heatmap_score_panel2))
+  cat(sprintf("  cell_group_mode = '%s',\n", user_inputs$heatmap_cell_group_mode_panel2))
+  cat(sprintf("  cluster_by = '%s'\n", ifelse(is.null(user_inputs$heatmap_cluster_by_panel2), "", user_inputs$heatmap_cluster_by_panel2)))
   cat(")\n\n")
   
-  cat("# Generate heatmap (using data from R params for actual plotting)\n")
-  cat("# Note: The heatmap is plotted using pre-computed data from the Shiny app\n")
-  cat("# but the zarr retrieval code above shows how to reproduce the analysis\n")
+  cat("# Generate heatmap\n")
+  cat("heatmap_plot <- render_heatmap(heatmap_data, NULL)\n")
+  cat("print(heatmap_plot)\n")
   cat("```\n\n")
   
   cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
@@ -334,35 +317,61 @@ if(!is.null(user_inputs$qc_plot_type)) {
   cat("**Reproducible Code:**\n\n")
   cat("```r\n")
   cat("# Load required libraries\n")
-  cat("library(zarr)\n")
-  cat("library(reticulate)\n")
-  cat("library(ggplot2)\n\n")
-  
-  cat("# Load analysis functions\n")
-  cat("source('https://raw.githubusercontent.com/george123ya/scRNAseq_Visualizer/main/modules/reproducible_functions.R')\n\n")
+  cat("source('https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R?raw=true')\n")
+  cat("library(reglScatterplot)\n\n")
   
   cat("# Initialize zarr data connection\n")
-  cat("zarr_path <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'\n")
-  cat("zarr_root <- zarr$open_group(zarr_path, mode='r')\n\n")
+  cat(sprintf("zarr_file <- '%s'\n", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr")))
+  cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
   
   if(user_inputs$qc_plot_type == "scatter") {
-    cat("# Retrieve QC metrics from zarr observations\n")
-    cat("x_metric <- zarr_root$obs$", user_inputs$qc_x_metric, "$values\n")
-    cat("y_metric <- zarr_root$obs$", user_inputs$qc_y_metric, "$values\n")
+    cat("# Define QC metrics\n")
+    cat(sprintf("x_metric <- '%s'\n", user_inputs$qc_x_metric))
+    cat(sprintf("qc_y_metric <- '%s'\n", user_inputs$qc_y_metric))
     if(!is.null(user_inputs$qc_color_by) && user_inputs$qc_color_by != "None") {
-      cat("color_metric <- zarr_root$obs$", user_inputs$qc_color_by, "$values\n")
+      cat(sprintf("color_metric <- '%s'\n", user_inputs$qc_color_by))
+    } else {
+      cat("color_metric <- NULL\n")
     }
+    cat("\n# Retrieve metrics from zarr\n")
+    cat("data <- as.data.frame(\n")
+    cat("  cbind(\n")
+    cat("    x = as.numeric(lazy_data$get_obs_column(lazy_data$z, x_metric)),\n")
+    cat("    y = as.numeric(lazy_data$get_obs_column(lazy_data$z, qc_y_metric)),\n")
+    cat("    color = if(!is.null(color_metric)) as.factor(lazy_data$get_obs_column(lazy_data$z, color_metric)) else NULL\n")
+    cat("  )\n)\n")
+    cat("colnames(data) <- c(x_metric, qc_y_metric, color_metric)\n\n")
+    cat("# Create scatter QC plot\n")
+    cat("p <- my_scatterplot(\n")
+    cat("  x = data[, x_metric],\n")
+    cat("  y = data[, qc_y_metric],\n")
+    cat("  colorBy = data[, color_metric],\n")
+    cat("  xlab = x_metric,\n")
+    cat("  ylab = qc_y_metric,\n")
+    cat("  showAxes = TRUE\n")
+    cat(")\n")
+    cat("print(p)\n")
   } else {
-    cat("# Retrieve QC metrics from zarr observations\n")
-    cat("qc_metric <- zarr_root$obs$", user_inputs$qc_metric, "$values\n")
-    cat("group_metric <- zarr_root$obs$", user_inputs$qc_group_by, "$values\n")
+    cat("# Define QC metric and grouping variable\n")
+    cat(sprintf("qc_metric <- '%s'\n", user_inputs$qc_metric))
+    cat(sprintf("group_metric <- '%s'\n", user_inputs$qc_group_by))
+    cat("\n# Retrieve metrics from zarr\n")
+    cat("data <- as.data.frame(\n")
+    cat("  cbind(\n")
+    cat("    Metric = as.numeric(lazy_data$get_obs_column(lazy_data$z, qc_metric)),\n")
+    cat("    Group = as.factor(lazy_data$get_obs_column(lazy_data$z, group_metric))\n")
+    cat("  )\n)\n")
+    cat("colnames(data) <- c(qc_metric, group_metric)\n\n")
+    cat("# Create violin QC plot\n")
+    cat("p <- my_violinplot(\n")
+    cat("  data = data,\n")
+    cat("  value = qc_metric,\n")
+    cat("  group = group_metric\n")
+    cat(")\n")
+    cat("print(p)\n")
   }
   
-  cat("\n# Note: The actual plotting uses pre-computed data from the Shiny app\n")
-  cat("# but the zarr retrieval code above shows how to reproduce the analysis\n\n")
-  
   cat("```\n\n")
-  
   cat("🔗 **Functions Source:** https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R\n\n")
 }
 ```
@@ -411,33 +420,27 @@ if(length(canvas_plots) > 0) {
 ```{r scatterplot-canvas-header, eval=!is.null(scatter_data[['main']]), results='asis'}
 cat("### Scatterplot Canvas\n\n")
 cat("#### Main Scatterplot Canvas\n\n")
-cat("**Reproducible Code (zarr data retrieval):**\n\n")
 cat("```r\n")
+
 cat("# Load required libraries\n")
-cat("library(zarr)\n")
-cat("library(reticulate)\n")
+cat("source('https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R?raw=true')\n")
 cat("library(reglScatterplot)\n\n")
 
 cat("# Initialize zarr data connection\n")
-cat("zarr_path <- '", ifelse(grepl("^https?://", user_inputs$dataset), user_inputs$dataset, "path/to/your/dataset.zarr"), "'\n")
-cat("zarr_root <- zarr$open_group(zarr_path, mode='r')\n\n")
+cat(paste0("zarr_file <- '", user_inputs$dataset, "'\n"))
+cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
 
-cat("# Retrieve coordinates from zarr (e.g., UMAP, t-SNE)\n")
 cat("# Assuming coordinates are stored in obsm\n")
-cat("if('obsm' %in% names(zarr_root) && 'X_umap' %in% names(zarr_root$obsm)) {\n")
-cat("  coords <- zarr_root$obsm$X_umap[]\n")
-cat("  x_coords <- coords[, 1]\n")
-cat("  y_coords <- coords[, 2]\n")
-cat("} else {\n")
-cat("  # Use alternative coordinates or generate them\n")
-cat("  x_coords <- zarr_root$obs$x_coord$values\n")
-cat("  y_coords <- zarr_root$obs$y_coord$values\n")
-cat("}\n\n")
+cat("coords <- lazy_data$get_obsm(\"X_umap\")\n")
+cat("x_coords <- coords[, 1]\n")
+cat("y_coords <- coords[, 2]\n\n")
 
 cat("# Retrieve annotations from zarr\n")
-cat("annotations <- zarr_root$obs$cluster$values  # or relevant annotation column\n\n")
+cat(paste0("annotations <- lazy_data$get_obs_column(lazy_data$z, '", ifelse(!is.null(user_inputs$colorBy) && user_inputs$colorBy != "None", user_inputs$colorBy, "None"), "')\n\n"))
 
-cat("# Note: The actual plotting uses pre-computed data from the Shiny app\n")
+cat("p <- my_scatterplot(x_coords, y_coords, colorBy = annotations, showAxes = FALSE)\n\n")
+cat("print(p)\n")
+
 cat("```\n\n")
 ```
 
@@ -486,51 +489,40 @@ if(length(gene_keys) > 0) {
     # Show the reproducible code for zarr retrieval
     cat("**Reproducible Code (zarr data retrieval):**\n\n")
     cat("```r\n")
-    cat("library(zarr)\n")
-    cat("library(reticulate)\n")
+    cat("source('https://github.com/george123ya/scRNAseq_Visualizer/blob/main/modules/reproducible_functions.R?raw=true')\n")
     cat("library(reglScatterplot)\n\n")
     
     cat("# Initialize zarr connection\n")
-    cat("zarr_path <- 'path/to/your/dataset.zarr'\n")
-    cat("zarr_root <- zarr$open_group(zarr_path, mode='r')\n\n")
+    cat(paste0("zarr_file <- '", user_inputs$dataset, "'\n"))
+    cat("lazy_data <- init_fast_zarr_h5ad(zarr_file)\n\n")
     
     cat("# Retrieve gene expression from zarr\n")
     cat(sprintf("gene_name <- '%s'\n", gene_name))
-    cat("available_genes <- zarr_root$var$index$values\n")
-    cat("gene_index <- match(toupper(gene_name), toupper(available_genes))\n")
-    cat("gene_expression <- zarr_root$X[, gene_index]\n\n")
+    cat("gene_expression <- lazy_data$get_gene_expression(gene_name, layer='X')\n\n")
     
-    cat("# Retrieve coordinates from zarr\n")
-    cat("if('obsm' %in% names(zarr_root) && 'X_umap' %in% names(zarr_root$obsm)) {\n")
-    cat("  coords <- zarr_root$obsm$X_umap[]\n")
-    cat("  x_coords <- coords[, 1]\n")
-    cat("  y_coords <- coords[, 2]\n")
-    cat("} else {\n")
-    cat("  x_coords <- zarr_root$obs$x_coord$values\n")
-    cat("  y_coords <- zarr_root$obs$y_coord$values\n")
-    cat("}\n\n")
+    cat("# Retrieve coordinates from obsm (e.g., UMAP)\n")
+    cat("coords <- lazy_data$get_obsm(\"X_umap\")\n")
+    cat("x_coords <- coords[, 1]\n")
+    cat("y_coords <- coords[, 2]\n\n")
+    
+    cat("# Retrieve annotations (optional)\n")
+    cat("annotations <- lazy_data$get_obs_column(lazy_data$z, 'celltype')\n\n")
     
     cat("# Create gene expression scatterplot\n")
-    cat("my_scatterplot(\n")
-    cat("  x = x_coords,\n")
-    cat("  y = y_coords,\n")
-    cat("  color = gene_expression,\n")
-    cat("  showAxes = FALSE\n")
-    cat(")\n")
+    cat("p <- my_scatterplot(x_coords, y_coords, colorBy = gene_expression, showAxes = FALSE)\n")
+    cat("print(p)\n")
     cat("```\n\n")
     
-    # Get the gene data
+    # Get the gene data for actual plotting
     gene_data <- scatter_data[[gene_name]]
     
-    # Create the plot using R data
     plot_obj <- my_scatterplot(
       x = gene_data$x,
       y = gene_data$y,
-      color = gene_data$annotations,
+      colorBy = gene_data$annotations,
       showAxes = FALSE
     )
     
-    # Use htmltools to render properly in loops
     if(requireNamespace("htmltools", quietly = TRUE)) {
       cat(as.character(htmltools::div(plot_obj, class = paste0("gene-plot-", i))))
     } else {
@@ -538,13 +530,12 @@ if(length(gene_keys) > 0) {
     }
     
     cat("\n\n")
-    
-    # Add description
-    cat(sprintf("This interactive scatterplot shows %s expression with coordinates and expression data retrieved from zarr but plotted using R data.\n\n", gene_name))
+    cat(sprintf("This interactive scatterplot shows %s expression using coordinates and gene expression retrieved from the zarr dataset, but rendered with R data.\n\n", gene_name))
   }
 } else {
   cat("No gene plots available.\n\n")
 }
+
 ```
 
 ## Data Processing Summary
@@ -572,13 +563,12 @@ cat("- **Reproducibility:** Users can reproduce the analysis by following the za
 cat("### Required R Packages for Reproduction\n\n")
 cat("```r\n")
 cat("# Install required packages if not already installed\n")
-cat("if(!require(zarr)) install.packages('zarr')\n")
 cat("if(!require(reticulate)) install.packages('reticulate')\n")
 cat("if(!require(ggplot2)) install.packages('ggplot2')\n")
 cat("if(!require(ComplexHeatmap)) BiocManager::install('ComplexHeatmap')\n")
 cat("if(!require(reglScatterplot)) {\n")
 cat("  # Install from GitHub or appropriate source\n")
-cat("  devtools::install_github('your-repo/reglScatterplot')\n")
+cat("  devtools::install_github('george123ya/reglScatterplot')\n")
 cat("}\n")
 cat("```\n\n")
 

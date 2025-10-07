@@ -9,6 +9,7 @@ library(shiny)
 library(plotly)
 library(jsonlite)
 library(fontawesome)
+library(reglScatterplot)
 
 # ==============================================================================
 # Enhanced scRNA-seq Interactive Visualizer UI with QC Tab
@@ -167,7 +168,8 @@ ui <- fluidPage(
           div(id = "status-container",
             textOutput("status")
           ),
-          uiOutput("dataInfo")
+          uiOutput("dataInfo"),
+          uiOutput("selectedInfo")
         )
       ),
       
@@ -203,7 +205,8 @@ ui <- fluidPage(
                 value = FALSE),
               tags$small(class = "text-muted", 
                 "Note: For visualization only, not for statistical analysis")
-            )
+            ),
+            uiOutput("chooseMatrixUI")
           )
         )
       ),
@@ -222,7 +225,7 @@ ui <- fluidPage(
               condition = "input.qc_plot_type != 'scatter'",
               uiOutput("gene_selected_ui"),
               uiOutput("gene_group_by_ui"),  # Add the Group by selector
-              actionButton("update_plots", "Update Plots"),  # Add button
+              actionButton("update_plots", "Update Plots", class = "btn btn-primary btn-sm"),  # Add button
             ),
             
             # Plot type selection
@@ -396,7 +399,35 @@ ui <- fluidPage(
               "Update Panel 2",
               class = "btn btn-primary btn-sm",
               style = "margin-top: 8px; width: 100%;"
-            )
+            ),
+
+            # Space
+            tags$hr(style = "margin: 10px 0; border-color: #e9ecef;"),
+
+            conditionalPanel(
+              condition = "input.heatmap_gene_group_mode_panel2 == 'custom_gmt' && output.gmt_loaded_panel2",
+
+              h5("Pathways / Geneset UMAP"),
+              
+              uiOutput("umap_gmt_select_panel2"),
+              
+              selectInput(
+                "umap_score_method_panel2",
+                "Score aggregation:",
+                choices = c("Mean" = "mean", "Sum" = "sum"),
+                selected = "mean",
+                width = "100%",
+                # style = "margin-top: 8px;"
+              ),
+              
+              actionButton(
+                "update_umap_panel2",
+                "Update UMAP Signature",
+                class = "btn btn-primary btn-sm",
+                # style = "margin-top: 8px; width: 100%;"
+              )
+            ),
+
           )
         )
       ),
@@ -583,7 +614,13 @@ ui <- fluidPage(
             div(class = "gene-plots",
               h4("Panel 2: Pathways/Gene Sets Heatmap"),
               plotOutput("heatmapPlot2", height = "auto")
-            )
+            ),
+
+            br(), br(),
+
+            # UMAP for gene sets
+            my_scatterplotOutput("umapPlot", width = "100%", height = "600px")
+
           )
         ),
         tabPanel("🔍 Quality Control", value = "qc",

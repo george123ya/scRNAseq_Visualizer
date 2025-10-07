@@ -170,11 +170,10 @@ function updatePlotLayout() {
   }, 50);
 }
 
-function createPlotTitle(canvas, title) {
+function createPlotTitle(canvas, title, plotId) {
   // Ensure each canvas is wrapped in its own relative container
   let container = canvas.parentElement;
   if (!container || !container.classList.contains('canvas-container')) {
-    // Create wrapper div
     container = document.createElement('div');
     container.className = 'canvas-container';
     container.style.cssText = `
@@ -184,8 +183,6 @@ function createPlotTitle(canvas, title) {
       display: flex;
       align-items: stretch;
     `;
-
-    // Insert container before canvas and move canvas inside it
     canvas.parentElement.insertBefore(container, canvas);
     container.appendChild(canvas);
   }
@@ -207,13 +204,415 @@ function createPlotTitle(canvas, title) {
     font-size: 12px;
     font-weight: bold;
     color: #333;
-    pointer-events: none;
+    pointer-events: auto;
     z-index: 10;
+    cursor: pointer;
   `;
-  titleOverlay.textContent = title;
+  titleOverlay.textContent = title || `Plot ${plotId}`;
+  titleOverlay.title = 'Click to download plot as PNG or SVG';
 
-  // Append to this canvas container
+  // Create dropdown for format selection
+  const formatDropdown = document.createElement('div');
+  formatDropdown.className = 'format-dropdown';
+  formatDropdown.style.cssText = `
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    z-index: 11;
+    display: none;
+    padding: 5px;
+  `;
+
+  const pngOption = document.createElement('div');
+  pngOption.textContent = 'Download as PNG';
+  pngOption.style.cssText = `
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #333;
+  `;
+  pngOption.addEventListener('mouseover', () => { pngOption.style.background = '#f0f0f0'; });
+  pngOption.addEventListener('mouseout', () => { pngOption.style.background = 'none'; });
+
+  const svgOption = document.createElement('div');
+  svgOption.textContent = 'Download as SVG';
+  svgOption.style.cssText = `
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #333;
+  `;
+  svgOption.addEventListener('mouseover', () => { svgOption.style.background = '#f0f0f0'; });
+  svgOption.addEventListener('mouseout', () => { svgOption.style.background = 'none'; });
+
+  formatDropdown.appendChild(pngOption);
+  formatDropdown.appendChild(svgOption);
+  titleOverlay.appendChild(formatDropdown);
+
+  // Toggle dropdown on click
+  titleOverlay.addEventListener('click', (e) => {
+    e.stopPropagation();
+    formatDropdown.style.display = formatDropdown.style.display === 'block' ? 'none' : 'block';
+  });
+
+  // Handle format selection
+  const handleSelection = (format) => {
+    const isMainPlot = plotId === 'main';
+    const legendKey = isMainPlot ? 'main_categorical' : `${plotId}_gene`;
+    const legendData = currentLegendData.get(legendKey);
+    console.log('Selected format:', format, 'Plot ID:', plotId, 'Legend key:', legendKey, 'Legend data:', legendData);
+    downloadPlot(canvas, plotId, legendData, format, title);
+    formatDropdown.style.display = 'none';
+  };
+
+  pngOption.addEventListener('click', () => handleSelection('png'));
+  svgOption.addEventListener('click', () => handleSelection('svg'));
+
+  // Close dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!titleOverlay.contains(e.target)) {
+      formatDropdown.style.display = 'none';
+    }
+  });
+
   container.appendChild(titleOverlay);
+}
+
+async function downloadPlot(canvas, plotId, legendData, format, titleText) {
+  console.log('downloadPlot called with:', { plotId, format, legendData, titleText });
+  const plotContainer = canvas.parentElement;
+  const isMainPlot = plotId === 'main';
+  const fileName = `${isMainPlot ? 'main_plot' : `gene_plot_${plotId}`}.${format}`;
+
+  // Helper function to escape SVG text
+  const escapeSvgText = (text) => {
+    if (!text) return '';
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  };
+
+  if (format === 'png') {
+    const tempCanvas = document.createElement('canvas');
+    const ctx = tempCanvas.getContext('2d');
+
+    const canvasWidth = canvas.width;
+    const canvasHeight = canvas.height;
+
+    const titleHeight = titleText ? 30 : 0;
+    let legendWidth = 0;
+    let legendHeight = 0;
+    const isCategorical = legendData && Array.isArray(legendData.names) && Array.isArray(legendData.colors) && legendData.names.length === legendData.colors.length;
+
+    console.log('isCategorical:', isCategorical, 'legendData:', legendData);
+
+    if (isCategorical) {
+      const itemHeight = 20;
+      const legendTitleHeight = 30;
+      legendHeight = legendData.names.length * itemHeight + legendTitleHeight;
+      legendWidth = 200;
+    } else if (legendData && typeof legendData.geneName === 'string') {
+      legendHeight = 120;
+      legendWidth = 150;
+    } else {
+      console.warn('No valid legend data for plot:', plotId, 'Legend data:', legendData);
+    }
+
+    tempCanvas.width = canvasWidth + (legendWidth ? legendWidth + 20 : 0);
+    tempCanvas.height = Math.max(canvasHeight, legendHeight || 0) + titleHeight;
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+    if (titleText) {
+      ctx.fillStyle = '#333';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(titleText, 10, 20);
+    }
+
+    try {
+      ctx.drawImage(canvas, 0, titleHeight, canvasWidth, canvasHeight);
+    } catch (error) {
+      console.error('Failed to draw canvas image:', error);
+      tempCanvas.remove();
+      return;
+    }
+
+    if (legendData) {
+      if (isCategorical) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+        ctx.fillRect(canvasWidth + 10, titleHeight, legendWidth, legendHeight);
+        ctx.strokeStyle = '#ddd';
+        ctx.strokeRect(canvasWidth + 10, titleHeight, legendWidth, legendHeight);
+
+        ctx.fillStyle = '#333';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center';
+        const legendTitle = legendData.annotationName ? legendData.annotationName.replace(/_/g, ' ') : 'Legend';
+        ctx.fillText(legendTitle, canvasWidth + 10 + legendWidth / 2, titleHeight + 20);
+
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'left';
+        legendData.names.forEach((name, i) => {
+          const y = titleHeight + 40 + i * 20;
+          const color = legendData.colors[i] || '#000000';
+          if (!/^#[0-9A-F]{6}$/i.test(color)) {
+            console.warn(`Invalid legend color at index ${i}: ${color}`);
+            ctx.fillStyle = '#000000';
+          } else {
+            ctx.fillStyle = color;
+          }
+          ctx.fillRect(canvasWidth + 20, y - 8, 12, 12);
+          ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+          ctx.strokeRect(canvasWidth + 20, y - 8, 12, 12);
+          ctx.fillStyle = '#333';
+          ctx.fillText(name || `Item ${i}`, canvasWidth + 38, y);
+        });
+      } else if (typeof legendData.geneName === 'string') {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+        ctx.fillRect(canvasWidth + 10, titleHeight, legendWidth, legendHeight);
+        ctx.strokeStyle = '#ddd';
+        ctx.strokeRect(canvasWidth + 10, titleHeight, legendWidth, legendHeight);
+
+        ctx.fillStyle = '#333';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(legendData.geneName, canvasWidth + 10 + legendWidth / 2, titleHeight + 20);
+
+        const gradientHeight = 80;
+        const gradient = ctx.createLinearGradient(0, titleHeight + gradientHeight + 30, 0, titleHeight + 30);
+        gradient.addColorStop(0, viridisColors[0] || '#000000');
+        gradient.addColorStop(0.5, viridisColors[Math.floor(viridisColors.length / 2)] || '#888888');
+        gradient.addColorStop(1, viridisColors[viridisColors.length - 1] || '#FFFFFF');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(canvasWidth + 20, titleHeight + 30, 20, gradientHeight);
+        ctx.strokeStyle = '#ccc';
+        ctx.strokeRect(canvasWidth + 20, titleHeight + 30, 20, gradientHeight);
+
+        ctx.fillStyle = '#333';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(legendData.maxVal || 'Max', canvasWidth + 50, titleHeight + 35);
+        ctx.fillText(legendData.midVal || 'Mid', canvasWidth + 50, titleHeight + 30 + gradientHeight / 2);
+        ctx.fillText(legendData.minVal || 'Min', canvasWidth + 50, titleHeight + 30 + gradientHeight - 5);
+
+        ctx.fillStyle = '#666';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`Data range: ${legendData.realMin || '0'} – ${legendData.realMax || '0'}`, canvasWidth + 10 + legendWidth / 2, titleHeight + gradientHeight + 40);
+      }
+    } else {
+      console.warn('No legend data provided for PNG download:', plotId);
+    }
+
+    try {
+      const link = document.createElement('a');
+      link.download = fileName;
+      link.href = tempCanvas.toDataURL('image/png');
+      link.click();
+      link.remove();
+      tempCanvas.remove();
+    } catch (error) {
+      console.error('Failed to download PNG:', error);
+      tempCanvas.remove();
+    }
+  } else if (format === 'svg') {
+    let svgContent = '<svg xmlns="http://www.w3.org/2000/svg" ';
+
+    const canvasWidth = canvas.width;
+    const canvasHeight = canvas.height;
+
+    const titleHeight = titleText ? 30 : 0;
+    let legendWidth = 0;
+    let legendHeight = 0;
+    const isCategorical = legendData && Array.isArray(legendData.names) && Array.isArray(legendData.colors) && legendData.names.length === legendData.colors.length;
+
+    console.log('isCategorical:', isCategorical, 'legendData:', legendData);
+
+    if (isCategorical) {
+      const itemHeight = 20;
+      const legendTitleHeight = 30;
+      legendHeight = legendData.names.length * itemHeight + legendTitleHeight;
+      legendWidth = 200;
+    } else if (legendData && typeof legendData.geneName === 'string') {
+      legendHeight = 120;
+      legendWidth = 150;
+    }
+
+    const svgWidth = canvasWidth + (legendWidth ? legendWidth + 20 : 0);
+    const svgHeight = Math.max(canvasHeight, legendHeight || 0) + titleHeight;
+    svgContent += `width="${svgWidth}" height="${svgHeight}">`;
+
+    if (titleText) {
+      svgContent += `
+        <text x="10" y="20" font-family="sans-serif" font-size="12px" font-weight="bold" fill="#333">
+          ${escapeSvgText(titleText)}
+        </text>
+      `;
+    }
+
+    const plot = isMainPlot ? scatterplot : genePlots[plotId];
+    console.log('Plot object:', plot, 'genePlots:', genePlots, 'plotId:', plotId);
+    if (!plot) {
+      console.error('Plot not found for ID:', plotId);
+      console.log('Available genePlots keys:', Object.keys(genePlots));
+      alert('Error: Plot not found. Using rasterized image in SVG.');
+      const imageData = canvas.toDataURL('image/png');
+      svgContent += `<image x="0" y="${titleHeight}" width="${canvasWidth}" height="${canvasHeight}" href="${imageData}" />`;
+    } else {
+      const pointsToRender = isMainPlot ? filteredPoints : filteredPoints;
+      let colors = [];
+      if (isCategorical) {
+        colors = legendData.colors;
+      } else if (legendData && typeof legendData.geneName === 'string') {
+        colors = viridisColors;
+      } else {
+        colors = ['#000000'];
+      }
+
+      console.log('Points to render length:', pointsToRender.length, 'Colors length:', colors.length);
+      console.log('Points sample:', pointsToRender.slice(0, 5));
+
+      let view;
+      try {
+        view = plot.get('cameraView') || { x: 0, y: 0, scale: 1 };
+        console.log('Camera view:', view);
+      } catch (error) {
+        console.warn('Could not get cameraView, using default scaling:', error);
+        view = { x: 0, y: 0, scale: 1 };
+      }
+
+      svgContent += `<g transform="translate(0,${titleHeight})">`;
+      if (pointsToRender && pointsToRender.length > 0) {
+        const maxPoints = 5000;
+        if (pointsToRender.length > maxPoints) {
+          console.warn(`Dataset too large (${pointsToRender.length} points). Using rasterized image for SVG.`);
+          alert(`Dataset too large (${pointsToRender.length} points). Rendering as rasterized image in SVG.`);
+          const imageData = canvas.toDataURL('image/png');
+          svgContent += `<image x="0" y="0" width="${canvasWidth}" height="${canvasHeight}" href="${imageData}" />`;
+        } else {
+          const step = Math.ceil(pointsToRender.length / maxPoints);
+          console.log(`Rendering ${Math.min(pointsToRender.length, maxPoints)} points for SVG (total: ${pointsToRender.length}, step: ${step})`);
+
+          try {
+            pointsToRender.forEach((point, i) => {
+              if (i % step !== 0) return;
+              const x = (point[0] * view.scale + view.x + 1) * canvasWidth / 2;
+              const y = canvasHeight - ((point[1] * view.scale + view.y + 1) * canvasHeight / 2);
+              if (isNaN(x) || isNaN(y) || !isFinite(x) || !isFinite(y)) {
+                console.warn(`Invalid point coordinates at index ${i}: [${point[0]}, ${point[1]}]`);
+                return;
+              }
+              let color;
+              if (isCategorical) {
+                color = colors[i % colors.length] || '#000000';
+                if (!/^#[0-9A-F]{6}$/i.test(color)) {
+                  console.warn(`Invalid color at index ${i}: ${color}`);
+                  color = '#000000';
+                }
+              } else if (legendData && typeof legendData.geneName === 'string' && point[2] !== undefined) {
+                const normalizedValue = (point[2] - (legendData.realMin || 0)) / ((legendData.realMax || 1) - (legendData.realMin || 0));
+                const colorIndex = Math.min(colors.length - 1, Math.max(0, Math.floor(normalizedValue * colors.length)));
+                color = colors[colorIndex] || '#000000';
+                if (!/^#[0-9A-F]{6}$/i.test(color)) {
+                  console.warn(`Invalid gene color at index ${i}: ${color}`);
+                  color = '#000000';
+                }
+              } else {
+                color = colors[0] || '#000000';
+              }
+              const pointSize = plot.get('pointSize') || 3;
+              svgContent += `<circle cx="${x}" cy="${y}" r="${pointSize}" fill="${color}" opacity="0.8" />`;
+            });
+          } catch (error) {
+            console.error('Error rendering SVG points:', error);
+            alert('Error rendering SVG points. Using rasterized image.');
+            svgContent += `<image x="0" y="0" width="${canvasWidth}" height="${canvasHeight}" href="${canvas.toDataURL('image/png')}" />`;
+          }
+        }
+      } else {
+        console.warn('No points available to render in SVG for plot:', plotId);
+        svgContent += `<text x="10" y="20" font-family="sans-serif" font-size="12px" fill="#333">No points available</text>`;
+      }
+      svgContent += `</g>`;
+    }
+
+    if (legendData) {
+      if (isCategorical) {
+        const itemHeight = 20;
+        svgContent += `
+          <g transform="translate(${canvasWidth + 10},${titleHeight})">
+            <rect x="0" y="0" width="${legendWidth}" height="${legendHeight}" fill="rgba(255,255,255,0.95)" stroke="#ddd" />
+            <text x="${legendWidth / 2}" y="20" font-family="sans-serif" font-size="12px" font-weight="bold" text-anchor="middle">
+              ${escapeSvgText(legendData.annotationName ? legendData.annotationName.replace(/_/g, ' ') : 'Legend')}
+            </text>
+        `;
+        legendData.names.forEach((name, i) => {
+          const y = 40 + i * itemHeight;
+          const color = legendData.colors[i] || '#000000';
+          if (!/^#[0-9A-F]{6}$/i.test(color)) {
+            console.warn(`Invalid legend color at index ${i}: ${color}`);
+            svgContent += `
+              <rect x="10" y="${y - 8}" width="12" height="12" fill="#000000" stroke="rgba(0,0,0,0.2)" />
+              <text x="30" y="${y}" font-family="sans-serif" font-size="10px" fill="#333">${escapeSvgText(name || `Item ${i}`)}</text>
+            `;
+          } else {
+            svgContent += `
+              <rect x="10" y="${y - 8}" width="12" height="12" fill="${color}" stroke="rgba(0,0,0,0.2)" />
+              <text x="30" y="${y}" font-family="sans-serif" font-size="10px" fill="#333">${escapeSvgText(name || `Item ${i}`)}</text>
+            `;
+          }
+        });
+        svgContent += `</g>`;
+      } else if (typeof legendData.geneName === 'string') {
+        const gradientId = `gradient_${plotId}`;
+        svgContent += `
+          <defs>
+            <linearGradient id="${gradientId}" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0%" stop-color="${viridisColors[0] || '#000000'}" />
+              <stop offset="50%" stop-color="${viridisColors[Math.floor(viridisColors.length / 2)] || '#888888'}" />
+              <stop offset="100%" stop-color="${viridisColors[viridisColors.length - 1] || '#FFFFFF'}" />
+            </linearGradient>
+          </defs>
+          <g transform="translate(${canvasWidth + 10},${titleHeight})">
+            <rect x="0" y="0" width="${legendWidth}" height="${legendHeight}" fill="rgba(255,255,255,0.95)" stroke="#ddd" />
+            <text x="${legendWidth / 2}" y="20" font-family="sans-serif" font-size="12px" font-weight="bold" text-anchor="middle">
+              ${escapeSvgText(legendData.geneName)}
+            </text>
+            <rect x="20" y="30" width="20" height="80" fill="url(#${gradientId})" stroke="#ccc" />
+            <text x="50" y="35" font-family="sans-serif" font-size="9px" fill="#333">${escapeSvgText(legendData.maxVal || 'Max')}</text>
+            <text x="50" y="${30 + 80 / 2}" font-family="sans-serif" font-size="9px" fill="#333">${escapeSvgText(legendData.midVal || 'Mid')}</text>
+            <text x="50" y="${30 + 80 - 5}" font-family="sans-serif" font-size="9px" fill="#333">${escapeSvgText(legendData.minVal || 'Min')}</text>
+            <text x="${legendWidth / 2}" y="${30 + 80 + 15}" font-family="sans-serif" font-size="9px" fill="#666" text-anchor="middle">
+              Data range: ${escapeSvgText(`${legendData.realMin || '0'} – ${legendData.realMax || '0'}`)}
+            </text>
+          </g>
+        `;
+      }
+    } else {
+      console.warn('No legend data provided for SVG download:', plotId);
+    }
+
+    svgContent += `</svg>`;
+
+    try {
+      console.log('SVG content length:', svgContent.length);
+      const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.download = fileName;
+      link.href = url;
+      link.click();
+      URL.revokeObjectURL(url);
+      link.remove();
+    } catch (error) {
+      console.error('Failed to download SVG:', error);
+      alert('Error downloading SVG: Invalid format or too large. Try PNG format.');
+    }
+  }
 }
 
 let lastClicked = null;
@@ -576,6 +975,7 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         const currentlyVisible = Array.from(visible);
         isUpdatingVisibility = true;
 
+        // Handle visibility toggling (unchanged)
         if (e.shiftKey && lastClicked !== null) {
           const start = Math.min(lastClicked, i);
           const end = Math.max(lastClicked, i);
@@ -617,6 +1017,14 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         });
         itemsContainer.scrollTop = scrollTop;
 
+        // Send visible category indices to Shiny
+        Shiny.setInputValue('visibleCategories', {
+          plotId: plotId,
+          annotationName: annotationName,
+          visibleIndices: Array.from(visible),
+          timestamp: Date.now()
+        }, { priority: 'event' });
+
         redrawAllPlots(mainAnnotation).finally(() => {
           isUpdatingVisibility = false;
           setTimeout(() => {
@@ -633,6 +1041,14 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
     });
 
     legendContainer.appendChild(itemsContainer);
+
+    // Send initial visible category indices to Shiny
+    Shiny.setInputValue('visibleCategories', {
+      plotId: plotId,
+      annotationName: annotationName,
+      visibleIndices: Array.from(visible),
+      timestamp: Date.now()
+    }, { priority: 'event' });
   }
 
   // Append and make draggable/resizable
@@ -1007,7 +1423,7 @@ async function createGenePlot(geneId) {
   plotGrid.appendChild(canvas);
   
   // Add title overlay - use the actual gene name
-  createPlotTitle(canvas, geneId);
+  createPlotTitle(canvas, geneId, geneId);
   
   // Import regl-scatterplot if not already imported
   const module = await import('https://esm.sh/regl-scatterplot@1.14.1');
@@ -1057,7 +1473,27 @@ async function createGenePlot(geneId) {
   // Subscribe to events
   plot.subscribe('select', ({ points: selectedIndices }) => {
     if (!syncing) {
-      const originalIndices = selectedIndices.map(i => points.indexOf(filteredPoints[i])).filter(i => i !== -1);
+      const eps = 1e-8;
+      const pointToIndex = new Map();
+
+      // Build the map once: O(M)
+      points.forEach((p, index) => {
+        // Round to ~10 decimal places to match eps tolerance and avoid float quirks
+        const key = `${p[0].toFixed(10)},${p[1].toFixed(10)}`;
+        if (!pointToIndex.has(key)) {
+          pointToIndex.set(key, index);
+        }
+      });
+
+      // Now map with fast lookups: O(N)
+      const originalIndices = selectedIndices
+        .map(i => {
+          const t = filteredPoints[i];
+          const key = `${t[0].toFixed(10)},${t[1].toFixed(10)}`;
+          return pointToIndex.get(key) ?? -1;
+        })
+        .filter(i => i !== -1);
+
       Shiny.setInputValue('selectedPoints', originalIndices);
       
       // Sync selection to other plots if in sync mode
@@ -1404,7 +1840,7 @@ async function initScatterplot() {
 
   // Create the plot grid and add title to main plot
   createPlotGrid();
-  createPlotTitle(canvas, 'Main View');
+  createPlotTitle(canvas, 'Main View', 'main');
 
   // Import regl-scatterplot
   const module = await import('https://esm.sh/regl-scatterplot@1.14.1');
@@ -1420,6 +1856,7 @@ async function initScatterplot() {
     width: canvas.clientWidth || 800,
     height: canvas.clientHeight || 400,
     // pointSize: 2.5,
+    pointScaleMode: 'asinh',
     opacity: 0.8,
     lassoOnLongPress: true,
     lassoType: 'freeform',
@@ -1432,25 +1869,80 @@ async function initScatterplot() {
 }
 
 function subscribeMainPlotEvents() {
+  // Modified plot.subscribe for selection
   scatterplot.subscribe('select', ({ points: selectedIndices }) => {
     if (!syncing) {
-      const originalIndices = selectedIndices.map(i => points.indexOf(filteredPoints[i])).filter(i => i !== -1);
-      Shiny.setInputValue('selectedPoints', originalIndices);
+      const eps = 1e-8;
+      const pointToIndex = new Map();
+
+      // Build the map once: O(M)
+      points.forEach((p, index) => {
+        // Round to ~10 decimal places to match eps tolerance and avoid float quirks
+        const key = `${p[0].toFixed(10)},${p[1].toFixed(10)}`;
+        if (!pointToIndex.has(key)) {
+          pointToIndex.set(key, index);
+        }
+      });
+
+      // Now map with fast lookups: O(N)
+      const originalIndices = selectedIndices
+        .map(i => {
+          const t = filteredPoints[i];
+          const key = `${t[0].toFixed(10)},${t[1].toFixed(10)}`;
+          return pointToIndex.get(key) ?? -1;
+        })
+        .filter(i => i !== -1);
+
+      console.log('Original indices of selected points:', originalIndices);
+      console.log('Selected indices in filteredPoints:', selectedIndices);
+
       
+      // Get the visible categories for the current plot
+      let plotId = 'main';
+      const legendKey = `${plotId}_categorical`;
+      const legendData = currentLegendData.get(legendKey);
+      const visibleIndices = legendData ? Array.from(legendData.visible) : [];
+
+      // Send both selected points and visible categories to Shiny
+      Shiny.setInputValue('selectedPoints', {
+        plotId: plotId,
+        selectedIndices: originalIndices,
+        originalIndices: originalIndices,
+        visibleCategories: visibleIndices,
+        annotationName: legendData ? legendData.annotationName : null,
+        timestamp: Date.now()
+      }, { priority: 'event' });
+      
+      console.log('Selected points:', selectedIndices);
+
       // Sync selection to other plots if in sync mode
       if (isSyncMode) {
-        syncSelectionToAllPlots(selectedIndices, 'main');
+        syncSelectionToAllPlots(selectedIndices, geneId);
       }
     }
   });
-  
+
   scatterplot.subscribe('deselect', () => {
     if (!syncing) {
-      Shiny.setInputValue('selectedPoints', []);
-      
+      // Get the visible categories for the current plot
+      let plotId = 'main';
+      const legendKey = `${plotId}_categorical`;
+      const legendData = currentLegendData.get(legendKey);
+      const visibleIndices = legendData ? Array.from(legendData.visible) : [];
+
+      // Send deselection info with visible categories
+      Shiny.setInputValue('selectedPoints', {
+        plotId: plotId,
+        selectedIndices: [],
+        originalIndices: [],
+        visibleCategories: visibleIndices,
+        annotationName: legendData ? legendData.annotationName : null,
+        timestamp: Date.now()
+      }, { priority: 'event' });
+
       // Sync deselection to other plots if in sync mode
       if (isSyncMode) {
-        syncDeselectionToAllPlots('main');
+        syncDeselectionToAllPlots(geneId);
       }
     }
   });
@@ -1493,6 +1985,8 @@ function filterPoints() {
       newP[2] = mainAnnotation.annotation[i] - 1; // match index
       return newP;
     });
+
+    console.log(mainAnnotation);
   
   
     return pointsColored.filter(p => {
@@ -1576,13 +2070,14 @@ async function redrawMainPlot(annotation=null) {
 
     if (filteredPoints.length < 300) {
       pointSize = 100;
-    } else if (filteredPoints.length < 50000) {
+    } else if (filteredPoints.length < 100000) {
       pointSize = 30;
     } else {
       pointSize = 3;
     }
-
-    console.log(filteredPoints);
+    
+    console.log(points[10]);
+    console.log(filteredPoints[10]);
     
     const config = { 
       colorBy: 'category',

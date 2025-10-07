@@ -17,16 +17,6 @@
 # - Gene set signature scoring
 # ==============================================================================
 
-# Download demo .h5ad file if not present
-
-# if (!file.exists("processed_data/relaxed_epdsc_annotated_data.h5")) {
-#   dir.create("processed_data", showWarnings = FALSE)
-#   message("📦 .h5 file not found, downloading from Google Drive...")
-  
-#   # Use gdown with the FILE ID
-#   system("gdown https://drive.google.com/uc?id=1DwykyMuvohpo1aFQsQerlGsmLl-IiHpy -O processed_data/relaxed_epdsc_annotated_data.h5")
-# }
-
 # Load required libraries
 suppressPackageStartupMessages({
   library(shiny)
@@ -311,132 +301,135 @@ process_zarr_data_fast <- function(z, file_path) {
   # Load SEACells if available
   seacell_df <- load_seacells_fast(z, zarr_keys)
   
-  # Load pathway data
-  # if (!requireNamespace("msigdbr", quietly = TRUE)) {
-  #   cat("⚠️ Installing msigdbr for pathway data...\n")
-  #   install.packages("msigdbr")
-  # }
-  # library(msigdbr)
-  
-  # pathways_df <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME")
-  # pathways <- split(pathways_df$gene_symbol, pathways_df$gs_name)
-  # cat("🛤️ Loaded", length(pathways), "Reactome pathways\n")
-  
-  # # Filter pathways
-  # valid_genes <- toupper(gene_info$display_names)
-  # pathways <- lapply(pathways, function(genes) intersect(toupper(genes), valid_genes))
-  # pathways <- pathways[sapply(pathways, length) > 0]
-  # cat("🛤️ Retained", length(pathways), "pathways with valid genes\n")
-  
-  # Create shortened pathway names
-  # pathway_names <- names(pathways)
-  # pathway_display_names <- sub("^REACTOME_", "", pathway_names)  # Remove REACTOME_ prefix
-  # pathway_display_names <- sapply(pathway_display_names, function(name) {
-  #   if (nchar(name) > 30) paste0(substr(name, 1, 27), "...") else name
-  # })
-  # names(pathways) <- pathway_names  # Keep full names as keys
-  # pathway_map <- data.frame(
-  #   full_name = pathway_names,
-  #   display_name = pathway_display_names,
-  #   stringsAsFactors = FALSE
-  # )
-  # cat("🛤️ Sample display names:", paste(head(pathway_display_names, 5), collapse = ", "), "\n")
-  
   # Create fast access functions
-  get_obs_column_fast <- function(z, name) {
-    to_r <- reticulate::py_to_r
-    builtins <- reticulate::import_builtins()
-    
-    if (!inherits(z, "python.builtin.object")) stop("⚠️ z is not a Python object.")
-    
-    root_keys <- to_r(builtins$list(z$keys()))
-    if (!("obs" %in% root_keys)) return(NULL)
-    
-    obs_keys <- to_r(builtins$list(z[["obs"]]$keys()))
-    if (!(name %in% obs_keys)) return(NULL)
-    
-    col_obj <- z[["obs"]][[name]]
-    
-    tryCatch({
-      zarr <- import("zarr")
-      py$col_obj <- col_obj
-      py$zarr <- zarr
+  get_obs_column_fast <- function(z, name, cells = NULL) {
+      to_r <- reticulate::py_to_r
+      builtins <- reticulate::import_builtins()
       
-      is_group <- py_eval("isinstance(col_obj, zarr.Group)")
+      if (!inherits(z, "python.builtin.object")) stop("⚠️ z is not a Python object.")
       
-      if (is_group) {
-        codes <- to_r(col_obj[['codes']][])
-        categories <- to_r(col_obj[['categories']][])
-        return(categories[codes + 1])
-      } else {
-        return(to_r(col_obj[]))
-      }
-    }, error = function(e) {
-      cat("⚠️ Error loading obs column", name, ":", e$message, "\n")
-      return(NULL)
-    })
+      root_keys <- to_r(builtins$list(z$keys()))
+      if (!("obs" %in% root_keys)) return(NULL)
+      
+      obs_keys <- to_r(builtins$list(z[["obs"]]$keys()))
+      if (!(name %in% obs_keys)) return(NULL)
+      
+      col_obj <- z[["obs"]][[name]]
+      
+      tryCatch({
+        zarr <- import("zarr")
+        py$col_obj <- col_obj
+        py$zarr <- zarr
+        
+        is_group <- py_eval("isinstance(col_obj, zarr.Group)")
+        full_col <- NULL
+        
+        if (is_group) {
+          full_codes <- to_r(col_obj[['codes']][])
+          full_categories <- to_r(col_obj[['categories']][])
+          
+          # Map full codes to categories
+          full_col <- full_categories[full_codes + 1]
+        } else {
+          full_col <- to_r(col_obj[])
+        }
+        
+        # Handle cell subsetting
+        if (is.null(cells) || identical(cells, "all")) {
+          return(full_col)
+        } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= length(full_col))) {
+          return(full_col[cells])
+        } else {
+          cat("⚠️ Invalid cells argument: must be NULL, 'all', or a valid list of 1-based indices\n")
+          return(full_col)  # Fallback to full
+        }
+      }, error = function(e) {
+        cat("⚠️ Error loading obs column", name, ":", e$message, "\n")
+        return(NULL)
+      })
   }
   
-  get_gene_expression_fast <- function(gene_name, layer = "X") {
-    gene_idx <- match(gene_name, gene_info$display_names)
-    cat("🔍 Looking for gene:", gene_name, "Found at index:", gene_idx, "\n")
-    if (is.na(gene_idx)) {
-      cat("❌ Gene", gene_name, "not found\n")
-      return(NULL)
-    }
-    
-    tryCatch({
-      if (layer == "X") {
+  get_gene_expression_fast <- function(gene_name, layer = "X", cells = NULL) {
+      gene_idx <- match(gene_name, gene_info$display_names)
+      cat("🔍 Looking for gene:", gene_name, "Found at index:", gene_idx, "\n")
+      if (is.na(gene_idx)) {
+        cat("❌ Gene", gene_name, "not found\n")
+        return(NULL)
+      }
+      
+      tryCatch({
+        gene_idx_py <- as.integer(gene_idx - 1)
+        full_expr_vec_py <- NULL
+        if (layer == "X") {
+          peak <- peakRAM({
+            full_expr_vec_py <- reticulate::py$get_gene_fast(z, gene_idx_py, 'X')
+          })
+          print(peak)
+          full_expr_vec <- py_to_r(full_expr_vec_py)
+        } else {
+          if (!(layer %in% layer_keys)) {
+            cat("❌ Layer", layer, "not available\n")
+            return(NULL)
+          }
+          full_expr_vec_py <- reticulate::py$get_gene_fast(z, gene_idx_py, layer)
+          full_expr_vec <- py_to_r(full_expr_vec_py)
+        }
+        
+        # Handle cell subsetting
+        if (is.null(cells) || identical(cells, "all")) {
+          return(full_expr_vec)
+        } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= length(full_expr_vec))) {
+          return(full_expr_vec[cells])
+        } else {
+          cat("⚠️ Invalid cells argument: must be NULL, 'all', or a valid list of 1-based indices\n")
+          return(full_expr_vec)  # Fallback to full
+        }
+      }, error = function(e) {
+        cat("⚠️ Error loading expression for", gene_name, ":", e$message, "\n")
+        return(NULL)
+      })
+  }
+  
+  get_genes_expression_batch <- function(gene_names, layer = "X", cells = NULL) {
+      gene_indices <- match(gene_names, gene_info$display_names)
+      valid_mask <- !is.na(gene_indices)
+      valid_indices <- as.integer(gene_indices[valid_mask] - 1)  # Ensure integer indices
+      valid_genes <- gene_names[valid_mask]
+      
+      if (length(valid_indices) == 0) {
+        cat("❌ No valid genes found in batch\n")
+        return(NULL)
+      }
+      
+      tryCatch({
         peak <- peakRAM({
-          expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1), 'X')
+          full_expr_mat_py <- reticulate::py$get_genes_batch(z, valid_indices, layer)
         })
         print(peak)
-        return(py_to_r(expr_vec))
-      } else {
-        if (!(layer %in% layer_keys)) {
-          cat("❌ Layer", layer, "not available\n")
-          return(NULL)
+        full_expr_mat <- py_to_r(full_expr_mat_py)
+        colnames(full_expr_mat) <- valid_genes
+        cat("📏 Batch retrieved expression for", length(valid_genes), "genes\n")
+        
+        # Handle cell subsetting (rows)
+        if (is.null(cells) || identical(cells, "all")) {
+          return(full_expr_mat)
+        } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= nrow(full_expr_mat))) {
+          return(full_expr_mat[cells, ])
+        } else {
+          cat("⚠️ Invalid cells argument: must be NULL, 'all', or a valid list of 1-based indices\n")
+          return(full_expr_mat)  # Fallback to full
         }
-        expr_vec <- reticulate::py$get_gene_fast(z, as.integer(gene_idx - 1), layer)
-        return(py_to_r(expr_vec))
-      }
-    }, error = function(e) {
-      cat("⚠️ Error loading expression for", gene_name, ":", e$message, "\n")
-      return(NULL)
-    })
-  }
-  
-  get_genes_expression_batch <- function(gene_names, layer = "X") {
-    gene_indices <- match(gene_names, gene_info$display_names)
-    valid_mask <- !is.na(gene_indices)
-    valid_indices <- as.integer(gene_indices[valid_mask] - 1)  # Ensure integer indices
-    valid_genes <- gene_names[valid_mask]
-    
-    if (length(valid_indices) == 0) {
-      cat("❌ No valid genes found in batch\n")
-      return(NULL)
-    }
-    
-    tryCatch({
-      peak <- peakRAM({
-        expr_mat <- reticulate::py$get_genes_batch(z, valid_indices, layer)
+      }, error = function(e) {
+        cat("⚠️ Error loading batch expression:", e$message, "\n")
+        cat("Run `reticulate::py_last_error()` for details.\n")
+        return(NULL)
       })
-      print(peak)
-      expr_mat <- py_to_r(expr_mat)
-      colnames(expr_mat) <- valid_genes
-      cat("📏 Batch retrieved expression for", length(valid_genes), "genes\n")
-      return(expr_mat)
-    }, error = function(e) {
-      cat("⚠️ Error loading batch expression:", e$message, "\n")
-      cat("Run `reticulate::py_last_error()` for details.\n")
-      return(NULL)
-    })
   }
   
   get_obsm_fast <- function(key) {
     if (!(key %in% obsm_keys)) return(NULL)
     tryCatch({
-      return(py_to_r(z$obsm[[key]][]))
+      return(py_to_r(z[['obsm']][[key]][]))
     }, error = function(e) {
       cat("⚠️ Error loading obsm", key, ":", e$message, "\n")
       return(NULL)
@@ -460,8 +453,6 @@ process_zarr_data_fast <- function(z, file_path) {
     get_gene_expression = get_gene_expression_fast,
     get_genes_expression_batch = get_genes_expression_batch,
     get_obsm = get_obsm_fast,
-    # pathways = pathways,
-    # pathway_map = pathway_map,  # Add mapping of full to display names
     n_cells = n_cells,
     n_genes = n_genes
   )
@@ -517,10 +508,6 @@ load_gene_info_fast <- function(var_group) {
     index_keys <- c("_index", "index", "gene_ids", "var_names")
     symbol_keys <- c("gene_symbols", "gene_symbol", "Symbol", "symbol", 'gene')
 
-    # symbol_keys <- c("gene_symbols", "gene_name", "symbol", "Symbol", 
-    #                       "gene_symbol", "Gene_Symbol", "SYMBOL", "name", 
-    #                       "Name", "feature_name")
-    
     var_index <- NULL
     for (key in index_keys) {
       if (key %in% var_attrs) {
@@ -695,14 +682,6 @@ load_seacells_fast <- function(z, zarr_keys) {
   })
 }
 
-# Usage example:
-# data <- init_fast_zarr_h5ad("path/to/file.zarr")
-# data <- init_fast_zarr_h5ad("path/to/file.h5ad")  
-# data <- init_fast_zarr_h5ad("https://example.com/file.zarr")
-# cell_type <- data$get_obs_column("cell_type")
-# gene_expr <- data$get_gene_expression("CD34")
-# umap_magic <- data$get_obsm("X_umap_magic")
-
 #' Fallback function if init_lazy_h5ad_enhanced is not available
 #' This is a simplified version for H5AD files
 init_lazy_h5ad_enhanced_fallback <- function(file_path) {
@@ -817,24 +796,6 @@ process_lazy_anndata_enhanced <- function(ad_obj, file_path, is_zarr = NULL) {
   var_df <- py_to_r(ad_obj$var)
   gene_info <- process_gene_names(ad_obj)
   cat("🧬 Found", length(gene_info$display_names), "genes\n")
-  
-  # # Load pathway data (e.g., Reactome pathways via msigdbr)
-  # if (!requireNamespace("msigdbr", quietly = TRUE)) {
-  #   cat("⚠️ Installing msigdbr for pathway data...\n")
-  #   install.packages("msigdbr")
-  # }
-  # library(msigdbr)
-  
-  # # Load Reactome pathways for human (adjust species if needed)
-  # pathways_df <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME")
-  # pathways <- split(pathways_df$gene_symbol, pathways_df$gs_name)
-  # cat("🛤️ Loaded", length(pathways), "Reactome pathways\n")
-  
-  # # Filter pathways to include only genes present in the dataset
-  # valid_genes <- toupper(gene_info$display_names)
-  # pathways <- lapply(pathways, function(genes) intersect(toupper(genes), valid_genes))
-  # pathways <- pathways[sapply(pathways, length) > 0]  # Keep only non-empty pathways
-  # cat("🛤️ Retained", length(pathways), "pathways with valid genes\n")
   
   # Get obsm keys
   obsm_keys <- py_to_r(ad_obj$obsm_keys())
@@ -1718,7 +1679,7 @@ server <- function(input, output, session) {
   })
 
   # UPDATED: Gene search observer with smart extraction
-  observeEvent(input$geneSearch, {
+  observeEvent(list(input$geneSearch, matrix_for_viz()), {
     req(values$lazy_data)
     
     if (!is.null(input$geneSearch) && length(input$geneSearch) > 0) {
@@ -1732,17 +1693,10 @@ server <- function(input, output, session) {
       session$sendCustomMessage("showSpinner", TRUE)
       
       # Use improved smart extraction
-      gene_data <- extract_gene_data_enhanced(gene_list, values$lazy_data)
-      
-      session$sendCustomMessage("showSpinner", FALSE)
-      
-      # print(paste("📊 Smart extracted data summary:"))
-      # print(paste("  - Genes found:", length(gene_data$genes)))
-      # print(paste("  - Normal data size:", nchar(gene_data$data)))
-      # print(paste("  - MAGIC data size:", nchar(gene_data$magic_data)))
-      # print(paste("  - Layer used:", gene_data$layer_used))
-      # print(paste("  - Strategy:", gene_data$memory_strategy))
-      
+      gene_data <- extract_gene_data_enhanced(gene_list, values$lazy_data, use_layer = matrix_for_viz())
+      print(paste("Expr extracted from layer:", matrix_for_viz()))
+
+      session$sendCustomMessage("showSpinner", FALSE)  
       session$sendCustomMessage("geneSearchChange", list(
         genes = gene_list,
         expression_data = gene_data
@@ -1779,64 +1733,6 @@ server <- function(input, output, session) {
       }
     }
   }, ignoreNULL = FALSE)
-
-  
-  # --- Annotation Color ---
-
-  # Color by UI
-  output$colorByUI <- renderUI({
-    if (is.null(categorical_vars())) {
-      selectInput("colorBy", "Color cells by:", choices = list("Initialize dataset first..." = "loading"))
-    } else {
-      # choices <- setNames(values$annotation_names, tools::toTitleCase(gsub("_", " ", values$annotation_names)))
-      choices <- c(categorical_vars(), numeric_obs_keys())
-      selectInput("colorBy", "Color cells by:", choices = choices, selected = choices[1])
-    }
-  })
-  
-  # Handle color by changes
-  observeEvent(input$colorBy, {
-    if (!is.null(input$colorBy) && input$colorBy != "loading") {
-      
-      # Get annotation column
-      annotation_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$colorBy)
-      
-      # Use the refined classification from obs_stats
-      stats <- obs_stats()
-      
-      # Determine var_type using your refined logic
-      if (input$colorBy %in% names(stats)) {
-        var_type <- ifelse(stats[[input$colorBy]]$numeric, "gene", "categorical")
-      } else {
-        # Fallback for columns not in obs_stats (shouldn't happen normally)
-        var_type <- "categorical"
-      }
-      
-      ann_colors <- generate_colors(length(unique(annotation_data)))
-      
-      if (var_type != 'gene') {
-        numeric_annotation_data <- as.numeric(factor(annotation_data, exclude = NULL))
-      } else {
-        numeric_annotation_data <- as.numeric(annotation_data)
-      }
-      
-      # Convert to binary and encode as base64
-      binary_data <- writeBin(as.numeric(numeric_annotation_data), 
-                            raw(), 
-                            size = 4, 
-                            endian = "little")
-      annotation_raw <- base64enc::base64encode(binary_data)
-      
-      session$sendCustomMessage("colorByChange", list(
-        colorBy = input$colorBy,
-        annotation_raw = annotation_raw,  # Send binary data
-        annotation_length = length(numeric_annotation_data),  # Include length for validation
-        names = sort(unique(annotation_data)),
-        colors = ann_colors,
-        var_type = var_type
-      ))
-    }
-  })
 
 
   # --- MAGIC Visual ---
@@ -1899,15 +1795,212 @@ server <- function(input, output, session) {
 
   # --- Selection Point Output ---
 
+  # Track last dataset change time (in ms, to match JS Date.now())
+  values$last_dataset_change <- reactiveVal(0)
+
+  # Update timestamp when dataset changes
+  observeEvent(input$dataset, {
+    values$last_dataset_change(as.numeric(Sys.time()) * 1000)
+  })
+
+  visible_categories <- reactive({
+    vis_cats <- input$visibleCategories
+    
+    # Return NULL if no value or timestamp is before last dataset change
+    if (is.null(vis_cats) || !is.numeric(vis_cats$timestamp) || vis_cats$timestamp < values$last_dataset_change()) {
+      return(NULL)
+    }
+    
+    vis_cats
+  })
+
+  # Reactive to store selected points
+  selected_points <- reactive({
+    input$selectedPoints
+  })
+
+  # Define a reactive expression for the subset indices
+  subset_indices_reactive <- reactive({
+    req(input$dataset, values$lazy_data)
+    
+    vis_cats <- visible_categories()
+    sel_points <- selected_points()
+
+    # Handle case with no visible categories (no category subsetting)
+    if (is.null(vis_cats)) {
+      selected_indices <- if (is.null(sel_points)) integer(0) else as.numeric(unlist(sel_points$selectedIndices)) + 1
+      
+      if (length(selected_indices) == 0) {
+        # All points when no selection
+        n_points <- nrow(values$lazy_data$df)
+        combined_subset_indices <- seq_len(n_points)
+      } else {
+        combined_subset_indices <- selected_indices
+      }
+      
+      list(
+        selected_visible = integer(0),
+        all_visible = seq_len(n_points),
+        combined = combined_subset_indices
+      )
+    } else {
+      # Extract visible category indices and names
+      annotation_name <- vis_cats$annotationName
+      visible_indices <- unlist(vis_cats$visibleIndices)
+
+      point_data <- values$lazy_data$get_obs_column(values$lazy_data$z, annotation_name)
+      category_names <- sort(unique(point_data))
+
+      visible_category_names <- category_names[visible_indices + 1]  # Adjust for 0-based indexing
+
+      # Extract selected point indices
+      selected_indices <- if (is.null(sel_points)) integer(0) else as.numeric(unlist(sel_points$selectedIndices)) + 1
+      
+      # Compute selected visible indices
+      selected_visible_indices <- integer(0)
+      if (length(selected_indices) > 0) {
+        selected_categories <- point_data[selected_indices]
+        visible_mask <- selected_categories %in% visible_category_names
+        selected_visible_indices <- selected_indices[visible_mask]
+      }
+
+      # All visible indices
+      all_visible_mask <- point_data %in% visible_category_names
+      all_visible_indices <- which(all_visible_mask)
+      
+      # Combined: all visible if no selection, otherwise selected visible
+      if (length(selected_indices) > 0) {
+        combined_subset_indices <- selected_visible_indices
+      } else {
+        combined_subset_indices <- all_visible_indices
+      }
+
+      list(
+        selected_visible = selected_visible_indices,
+        all_visible = all_visible_indices,
+        combined = combined_subset_indices
+      )
+    }
+  })
+
+  # Optionally store the combined in reactiveValues for broader access
+  observe({
+    values$global_subset_indices <- subset_indices_reactive()$combined
+  })
+
+  output$selectedInfo <- renderUI({
+    subset_info <- subset_indices_reactive()
+    
+    vis_cats <- visible_categories()
+    sel_points <- selected_points()
+
+    print(vis_cats)
+    # print(sel_points)
+
+    # Default output if no selection at all
+    if (is.null(sel_points) || length(unlist(sel_points$selectedIndices)) == 0) {
+      if (is.null(vis_cats)) {
+        return(HTML("No points selected or no categories visible."))
+      } else {
+        # Show basic info if categories visible but no selection
+        point_data <- values$lazy_data$get_obs_column(values$lazy_data$z, vis_cats$annotationName)
+        category_names <- sort(unique(point_data))
+        visible_indices <- unlist(vis_cats$visibleIndices)
+        visible_category_names <- category_names[visible_indices + 1]  # Adjust for 0-based indexing
+        
+        return(HTML(
+          paste(
+            "<table border='1' style='border-collapse: collapse; width: 100%;'>",
+            "<tr><th>Information</th><th>Value</th></tr>",
+            "<tr><td><b>Visible Categories</b></td><td>", paste(visible_category_names, collapse = ", "), "</td></tr>",
+            "<tr><td><b>Selected Points</b></td><td>None</td></tr>",
+            "<tr><td><b>Number of Selected Visible Indices</b></td><td>", length(subset_info$selected_visible), "</td></tr>",
+            "<tr><td><b>Number of All Visible Indices</b></td><td>", length(subset_info$all_visible), "</td></tr>",
+            "<tr><td><b>Number of Combined Subset Indices (Global)</b></td><td>", length(subset_info$combined), "</td></tr>",
+            "</table>"
+          )
+        ))
+      }
+    }
+
+    # At this point, there is a lasso selection (sel_points not null and has indices)
+    selected_indices <- as.numeric(unlist(sel_points$selectedIndices)) + 1
+    
+    # Handle case with no visible categories (no category subsetting)
+    if (is.null(vis_cats)) {
+      return(HTML(
+        paste(
+          "<table border='1' style='border-collapse: collapse; width: 100%;'>",
+          "<tr><th>Information</th><th>Value</th></tr>",
+          "<tr><td><b>Visible Categories</b></td><td>None (no category subsetting selected)</td></tr>",
+          "<tr><td><b>Selected Points</b></td><td>", length(selected_indices), "</td></tr>",
+          "<tr><td><b>Number of Selected Visible Indices</b></td><td>", length(subset_info$selected_visible), "</td></tr>",
+          "<tr><td><b>Number of All Visible Indices</b></td><td>", length(subset_info$all_visible), "</td></tr>",
+          "<tr><td><b>Number of Combined Subset Indices (Global)</b></td><td>", length(subset_info$combined), "</td></tr>",
+          "</table>"
+        )
+      ))
+    }
+
+    # Now handle case with both lasso selection and visible categories
+    point_data <- values$lazy_data$get_obs_column(values$lazy_data$z, vis_cats$annotationName)
+    category_names <- sort(unique(point_data))
+    print(category_names)
+
+    visible_indices <- unlist(vis_cats$visibleIndices)
+    visible_category_names <- category_names[visible_indices + 1]  # Adjust for 0-based indexing
+
+    # Map selected indices to categories
+    selected_categories <- point_data[selected_indices]
+
+    # Filter for visible categories
+    selected_visible_categories <- selected_categories[selected_categories %in% visible_category_names]
+
+    # Summarize counts per category
+    category_counts <- table(selected_visible_categories)
+
+    # Generate summary table
+    summary_table <- paste(
+      "<table border='1' style='border-collapse: collapse; width: 100%;'>",
+      "<tr><th>Information</th><th>Value</th></tr>",
+      "<tr><td><b>Visible Categories</b></td><td>", paste(visible_category_names, collapse = ", "), "</td></tr>",
+      "<tr><td><b>Selected Points</b></td><td>", length(selected_indices), "</td></tr>",
+      "<tr><td><b>Number of Selected Visible Indices</b></td><td>", length(subset_info$selected_visible), "</td></tr>",
+      "<tr><td><b>Number of All Visible Indices</b></td><td>", length(subset_info$all_visible), "</td></tr>",
+      "<tr><td><b>Number of Combined Subset Indices (Global)</b></td><td>", length(subset_info$combined), "</td></tr>",
+      "</table>"
+    )
+
+    # Generate counts table if there are selected visible categories
+    if (length(selected_visible_categories) > 0) {
+      counts_rows <- paste(
+        sapply(names(category_counts), function(cat) {
+          paste0("<tr><td>", cat, "</td><td>", category_counts[cat], "</td></tr>")
+        }),
+        collapse = ""
+      )
+      counts_table <- paste(
+        "<br><table border='1' style='border-collapse: collapse; width: 100%;'>",
+        "<tr><th>Selected Category</th><th>Count</th></tr>",
+        counts_rows,
+        "</table>"
+      )
+    } else {
+      counts_table <- "<br><p>No selected points in visible categories.</p>"
+    }
+
+    HTML(paste(summary_table, counts_table))
+  })
+
   # Selected points output
   output$selected_points <- renderPrint({
     if (is.null(input$selectedPoints) || length(input$selectedPoints) == 0) {
       "No cells selected. Use lasso tool to select cells."
     } else {
       paste0(
-        "Selected cells: ", length(input$selectedPoints),
-        "\nIndices (first 15): ", paste(head(input$selectedPoints, 15), collapse = ", "),
-        if (length(input$selectedPoints) > 15) " ..."
+        "Selected cells: ", length(input$selectedPoints$selectedIndices),
+        "\nIndices (first 15): ", paste(head(input$selectedPoints$selectedIndices, 15), collapse = ", "),
+        if (length(input$selectedPoints$selectedIndices) > 15) " ..."
       )
     }
   })
@@ -1969,6 +2062,77 @@ server <- function(input, output, session) {
   numeric_obs_keys <- reactive({
     stats <- obs_stats()
     sort(names(Filter(function(s) s$numeric, stats)))
+  })
+
+  # --- Choose Matrix ---
+
+  output$chooseMatrixUI <- renderUI({
+    req(numeric_obs_keys())
+    selectInput("chooseMatrix", "Choose Matrix:",
+      choices = c('X', values$lazy_data$available_layers),
+      selected = 'X'
+    )
+  })
+
+  matrix_for_viz <- reactive({
+    input$chooseMatrix
+  })
+
+  # --- Annotation Color ---
+
+  # Color by UI
+  output$colorByUI <- renderUI({
+    if (is.null(categorical_vars())) {
+      selectInput("colorBy", "Color cells by:", choices = list("Initialize dataset first..." = "loading"))
+    } else {
+      # choices <- setNames(values$annotation_names, tools::toTitleCase(gsub("_", " ", values$annotation_names)))
+      choices <- c(categorical_vars(), numeric_obs_keys())
+      selectInput("colorBy", "Color cells by:", choices = choices, selected = choices[1])
+    }
+  })
+  
+  # Handle color by changes
+  observeEvent(input$colorBy, {
+    if (!is.null(input$colorBy) && input$colorBy != "loading") {
+      
+      # Get annotation column
+      annotation_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$colorBy)
+      
+      # Use the refined classification from obs_stats
+      stats <- obs_stats()
+      
+      # Determine var_type using your refined logic
+      if (input$colorBy %in% names(stats)) {
+        var_type <- ifelse(stats[[input$colorBy]]$numeric, "gene", "categorical")
+      } else {
+        # Fallback for columns not in obs_stats (shouldn't happen normally)
+        var_type <- "categorical"
+      }
+      
+      ann_colors <- generate_colors(length(unique(annotation_data)))
+      
+      if (var_type != 'gene') {
+        numeric_annotation_data <- as.numeric(factor(annotation_data, exclude = NULL))
+      } else {
+        numeric_annotation_data <- as.numeric(annotation_data)
+      }
+      
+      # Convert to binary and encode as base64
+      binary_data <- writeBin(as.numeric(numeric_annotation_data), 
+                            raw(), 
+                            size = 4, 
+                            endian = "little")
+      annotation_raw <- base64enc::base64encode(binary_data)
+      
+      session$sendCustomMessage("colorByChange", list(
+        colorBy = input$colorBy,
+        annotation_raw = annotation_raw,  # Send binary data
+        annotation_length = length(numeric_annotation_data),  # Include length for validation
+        names = sort(unique(annotation_data)),
+        colors = ann_colors,
+        var_type = var_type
+      ))
+    }
   })
 
 
@@ -2141,6 +2305,210 @@ server <- function(input, output, session) {
     gene_sets
   })
 
+  output$umap_gmt_select_panel2 <- renderUI({
+    req(gmt_data_panel2())
+    gmt_sets <- gmt_data_panel2()
+    set_names <- names(gmt_sets)
+    
+    display_names <- sapply(set_names, function(x) {
+      if (nchar(x) > 60) {
+        paste0(substr(x, 1, 57), "...")
+      } else {
+        x
+      }
+    })
+    names(display_names) <- set_names
+    
+    selectizeInput(
+      "umap_gmt_sets_panel2",
+      "Select gene sets:",
+      choices = display_names,
+      multiple = TRUE,
+      options = list(
+        placeholder = "Select one or more gene sets...",
+        maxOptions = 500,
+        onInitialize = I('function() { this.setValue(""); }')
+      )
+    )
+  })
+
+  # --- Button-controlled pathway scoring and UMAP rendering ---
+
+  # Disable button while computing (optional but recommended)
+  observeEvent(input$update_umap_panel2, {
+    shinyjs::disable("update_umap_panel2")
+    on.exit(shinyjs::enable("update_umap_panel2"))
+  })
+
+  # 1️⃣ Pathway scores: only compute when button pressed
+  pathway_scores <- eventReactive(input$update_umap_panel2, {
+    req(input$umap_gmt_sets_panel2, gmt_data_panel2())
+    
+    selected_sets <- input$umap_gmt_sets_panel2
+    all_gmt <- gmt_data_panel2()
+    gene_groups <- all_gmt[selected_sets]
+    req(length(gene_groups) > 0)
+
+    # --- Safe cell count ---
+    n_cells_safe <- function() {
+      tryCatch({
+        if (!is.null(values$lazy_data$zarr_obj)) {
+          obs_keys <- py_to_r(reticulate::import_builtins()$list(values$lazy_data$zarr_obj[["obs"]]$keys()))
+          if (length(obs_keys) > 0) {
+            first_obs <- values$lazy_data$zarr_obj[["obs"]][[obs_keys[1]]]
+            return(as.integer(py_to_r(first_obs$shape[1])))
+          }
+        }
+        if (is.numeric(values$lazy_data$n_cells)) {
+          return(as.integer(values$lazy_data$n_cells))
+        }
+        return(1000L)
+      }, error = function(e) {
+        cat("⚠️ Error getting n_cells, using fallback: 1000\n")
+        return(1000L)
+      })
+    }
+    
+    n_cells_default <- n_cells_safe()
+
+    subset_indices <- isolate({
+      if (!is.null(subset_indices_reactive())) subset_indices_reactive()$combined else NULL
+    })
+    
+    # Collect all unique genes from selected gene sets
+    all_geneset_genes <- unique(unlist(gene_groups))
+    valid_genes <- intersect(toupper(all_geneset_genes), toupper(values$lazy_data$genes))
+    
+    scores_matrix <- NULL
+    if (length(valid_genes) > 0) {
+      # Get expression for all genes at once (all cells for UMAP)
+      all_expr_mat <- isolate(values$lazy_data$get_genes_expression_batch(
+        valid_genes, 
+        layer = matrix_for_viz(), 
+        cells = subset_indices
+      ))
+      
+      print(paste("Expression matrix loaded with", nrow(all_expr_mat), "cells and", ncol(all_expr_mat), "genes"))
+      
+      if (!is.null(all_expr_mat) && nrow(all_expr_mat) > 0) {
+        gene_lookup <- setNames(1:ncol(all_expr_mat), toupper(colnames(all_expr_mat)))
+        n_cells_actual <- as.integer(nrow(all_expr_mat))
+        
+        print(paste("Calculating scores for", length(gene_groups), "gene sets across", n_cells_actual, "cells"))
+        
+        mat <- sapply(seq_along(gene_groups), function(i) {
+          if (is.list(gene_groups[[i]]) && "genes" %in% names(gene_groups[[i]])) {
+            geneset_genes <- intersect(toupper(gene_groups[[i]]$genes), names(gene_lookup))
+          } else {
+            geneset_genes <- intersect(toupper(gene_groups[[i]]), names(gene_lookup))
+          }
+          
+          if (length(geneset_genes) > 0) {
+            gene_indices <- gene_lookup[geneset_genes]
+            gene_indices <- gene_indices[!is.na(gene_indices)]
+            
+            if (length(gene_indices) > 0) {
+              expr_subset <- all_expr_mat[, gene_indices, drop = FALSE]
+              if (input$umap_score_method_panel2 == "mean") {
+                rowMeans(expr_subset, na.rm = TRUE)
+              } else {
+                rowSums(expr_subset, na.rm = TRUE)
+              }
+            } else {
+              rep(0, n_cells_actual)
+            }
+          } else {
+            rep(0, n_cells_actual)
+          }
+        })
+        scores_matrix <- round(mat, 2)
+        colnames(scores_matrix) <- names(gene_groups)
+      } else {
+        print("⚠️ Fallback: Using zero matrix")
+        scores_matrix <- matrix(0, nrow = n_cells_default, ncol = length(gene_groups))
+        colnames(scores_matrix) <- names(gene_groups)
+      }
+    } else {
+      print("⚠️ No valid genes found in selected gene sets, using zero matrix")
+      scores_matrix <- matrix(0, nrow = n_cells_default, ncol = length(gene_groups))
+      colnames(scores_matrix) <- names(gene_groups)
+    }
+
+    cat("Pathway scores updated for", length(selected_sets), "sets\n")
+    scores_matrix
+  })
+
+
+  # 2️⃣ UMAP data: also only recompute when button is pressed
+  umap_data <- eventReactive(input$update_umap_panel2, {
+    req(pathway_scores())
+
+    subset_indices <- isolate({
+      if (!is.null(subset_indices_reactive())) {
+        subset_indices_reactive()$combined
+      } else {
+        seq_len(nrow(values$lazy_data$df))
+      }
+    })
+
+    umap_df <- isolate(values$lazy_data$df[subset_indices, , drop = FALSE])
+    req(!is.null(umap_df) && nrow(umap_df) >= 2)
+
+    umap_coords <- umap_df[, 1:2]
+    colnames(umap_coords) <- c("x", "y")
+
+    n_cells_umap <- nrow(umap_coords)
+    n_cells_scores <- nrow(pathway_scores())
+
+    print(paste("UMAP cells:", n_cells_umap, "Scores cells:", n_cells_scores))
+
+    if (n_cells_umap != n_cells_scores) {
+      if (n_cells_umap > n_cells_scores) {
+        umap_coords <- umap_coords[1:n_cells_scores, ]
+      } else {
+        extra_scores <- matrix(0, nrow = n_cells_umap - n_cells_scores, ncol = ncol(pathway_scores()))
+        padded_scores <- rbind(pathway_scores(), extra_scores)
+        # not reactiveVal anymore, so no reassign
+      }
+    }
+
+    first_pathway <- colnames(pathway_scores())[1]
+    req(!is.null(first_pathway))
+
+    plot_data <- cbind(umap_coords, as.data.frame(pathway_scores()))
+    list(data = plot_data, colorBy = first_pathway)
+  })
+
+
+  # 3️⃣ Rendering — triggered only after eventReactive runs
+  output$umapPlot <- renderMy_scatterplot({
+    req(umap_data())
+    
+    ud <- umap_data()
+    req(ud$colorBy %in% names(ud$data))
+
+    print(paste("Rendering UMAP with colorBy:", ud$colorBy, "and", nrow(ud$data), "cells"))
+
+    my_scatterplot(
+      data = ud$data,
+      x = "x",
+      y = "y",
+      colorBy = ud$colorBy,
+      # size = 1.5,
+      continuous_palette = "inferno",
+      xlab = "UMAP 1",
+      ylab = "UMAP 2",
+      showAxes = FALSE,
+      showTooltip = TRUE,
+      opacity = 0.8,
+      backgroundColor = "transparent",
+      legend_title = ud$colorBy,
+      enableDownload = TRUE,
+    )
+  })
+
+
+
   # UI select for GMT gene sets (Panel 2) - with "All" option
   output$heatmap_gmt_select_panel2 <- renderUI({
     req(gmt_data_panel2())
@@ -2197,7 +2565,14 @@ server <- function(input, output, session) {
       genes <- genes[genes %in% toupper(values$lazy_data$genes)]
       req(length(genes) > 0, "No valid genes found in dataset for Panel 1")
 
-      expr_mat <- values$lazy_data$get_genes_expression_batch(genes, layer = "X")
+      if (!is.null(subset_indices_reactive())) {
+        subset_indices <- subset_indices_reactive()$combined
+      } else {
+        subset_indices <- NULL
+      }
+
+      expr_mat <- values$lazy_data$get_genes_expression_batch(genes, layer = matrix_for_viz(), cells = subset_indices)
+
       if (is.null(expr_mat)) {
         mat <- matrix(NA, nrow = values$lazy_data$n_cells, ncol = length(genes))
         colnames(mat) <- genes
@@ -2206,7 +2581,7 @@ server <- function(input, output, session) {
       }
       
       incProgress(0.5)
-      process_heatmap_data(mat, input$heatmap_score_panel1, input$heatmap_cell_group_mode_panel1, input$heatmap_cluster_by_panel1)
+      process_heatmap_data(mat, input$heatmap_score_panel1, input$heatmap_cell_group_mode_panel1, input$heatmap_cluster_by_panel1, subset_indices)
     })
   }, ignoreNULL = FALSE, ignoreInit = FALSE)
 
@@ -2218,6 +2593,12 @@ server <- function(input, output, session) {
     withProgress(message = "Updating Panel 2 heatmap...", value = 0, {
       req(input$heatmap_gene_group_mode_panel2)
       incProgress(0.1)
+
+      if (!is.null(subset_indices_reactive())) {
+        subset_indices <- subset_indices_reactive()$combined
+      } else {
+        subset_indices <- NULL
+      }
 
       gene_groups <- NULL
       gene_group_names <- NULL
@@ -2312,7 +2693,7 @@ server <- function(input, output, session) {
         
         if (length(valid_genes) > 0) {
           # Get expression for all genes at once
-          all_expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = "X")
+          all_expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = matrix_for_viz(), cells = subset_indices)
           
           if (!is.null(all_expr_mat) && nrow(all_expr_mat) > 0) {
             # Create gene lookup for fast indexing
@@ -2356,7 +2737,7 @@ server <- function(input, output, session) {
         
         if (length(valid_genes) > 0) {
           # Get expression for all genes at once
-          all_expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = "X")
+          all_expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = matrix_for_viz(), cells = subset_indices)
           
           if (!is.null(all_expr_mat) && nrow(all_expr_mat) > 0) {
             # Create gene lookup for fast indexing
@@ -2403,7 +2784,7 @@ server <- function(input, output, session) {
           }
           
           if (length(valid_genes) > 0) {
-            expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = "X")
+            expr_mat <- values$lazy_data$get_genes_expression_batch(valid_genes, layer = matrix_for_viz(), cells = subset_indices)
             if (!is.null(expr_mat)) {
               rowMeans(expr_mat, na.rm = TRUE)
             } else {
@@ -2417,12 +2798,12 @@ server <- function(input, output, session) {
       colnames(mat) <- gene_group_names
       
       incProgress(0.5)
-      process_heatmap_data(mat, input$heatmap_score_panel2, input$heatmap_cell_group_mode_panel2, input$heatmap_cluster_by_panel2)
+      process_heatmap_data(mat, input$heatmap_score_panel2, input$heatmap_cell_group_mode_panel2, input$heatmap_cluster_by_panel2, subset_indices)
     })
   }, ignoreNULL = FALSE, ignoreInit = FALSE)
 
   # Helper function to process heatmap data
-  process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by) {
+  process_heatmap_data <- function(mat, score_type, cell_group_mode, cluster_by, cells) {
     # Fill missing values
     mat[is.na(mat)] <- 0
 
@@ -2436,7 +2817,7 @@ server <- function(input, output, session) {
     # Cell grouping logic
     if (cell_group_mode == "categorical") {
       req(cluster_by)
-      group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
+      group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by, cells)
       req(length(group_var) == nrow(mat))
       
       group_levels <- sort(unique(group_var))
@@ -2446,7 +2827,7 @@ server <- function(input, output, session) {
       mat <- t(mat)
     } else if (cell_group_mode == "none") {
       req(cluster_by)
-      group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by)
+      group_var <- values$lazy_data$get_obs_column(values$lazy_data$zarr_obj, cluster_by, cells)
       req(length(group_var) == nrow(mat))
       
       group_levels <- sort(unique(group_var))
@@ -2577,19 +2958,7 @@ server <- function(input, output, session) {
   }
 
 
-
-
-
   # Gene Tab
-
-  # Single metric (for violin/box/hist)
-  # output$gene_selected_ui <- renderUI({
-  #   if (is.null(input$geneSearch) || length(input$geneSearch) == 0) {
-  #     helpText("Select a gene from the search box to visualize expression.")
-  #   } else {
-  #     h4(paste("Selected gene(s):", paste(input$geneSearch, collapse = ", ")))
-  #   }
-  # })
 
   # UI: Gene search for violin_plot_genes tab
   output$gene_selected_ui <- renderUI({
@@ -2628,11 +2997,13 @@ server <- function(input, output, session) {
     values$geneSearch_tab_selection <- input$geneSearch_tab
   }) %>% bindEvent(input$geneSearch_tab, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-  # Reset gene selections when dataset changes
+  # Reset gene selections and cache when dataset changes
   observe({
-    message("Dataset changed, resetting gene selections") # Debug
+    message("Dataset changed, resetting gene selections and cache") # Debug
     values$geneSearch_selection <- NULL
     values$geneSearch_tab_selection <- NULL
+    gene_data_cache$data <- list()  # Clear entire cache
+    displayed_genes$genes <- character(0)  # Reset displayed genes
   }) %>% bindEvent(input$dataset, ignoreNULL = TRUE, ignoreInit = TRUE)
 
   # Update gene choices when data is loaded, resetting selections
@@ -2689,15 +3060,27 @@ server <- function(input, output, session) {
     req(input$geneSearch_tab, input$gene_group_by)
     genes <- input$geneSearch_tab
 
+    # Get current subset
+    current_subset <- if (!is.null(subset_indices_reactive())) {
+      subset_indices_reactive()$combined
+    } else {
+      NULL
+    }
+
     # Update cache for new or changed genes
     for (gene in genes) {
-      if (is.null(gene_data_cache$data[[gene]]) || 
-          !identical(input$gene_group_by, gene_data_cache$data[[gene]]$group_by)) {
+      cached <- gene_data_cache$data[[gene]]
+      invalidate_cache <- is.null(cached) || 
+                          !identical(input$gene_group_by, cached$group_by) ||
+                          !identical(current_subset, cached$subset_indices)
+
+      if (invalidate_cache) {
         # Get expression for this gene
-        expr <- values$lazy_data$get_gene_expression(gene_name = gene)
+        
+        expr <- values$lazy_data$get_gene_expression(gene_name = gene, layer = matrix_for_viz(), cells = current_subset)
         
         # Get grouping variable
-        group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$gene_group_by)
+        group_var <- values$lazy_data$get_obs_column(values$lazy_data$z, input$gene_group_by, cells = current_subset)
         req(group_var)
         group_var <- as.factor(group_var)
         
@@ -2707,7 +3090,8 @@ server <- function(input, output, session) {
         # Cache the data
         gene_data_cache$data[[gene]] <- list(
           data = df,
-          group_by = input$gene_group_by
+          group_by = input$gene_group_by,
+          subset_indices = current_subset  # Store subset for invalidation
         )
       }
     }
@@ -2791,6 +3175,12 @@ server <- function(input, output, session) {
       req(values$lazy_data)
       
       metadata_vals <- NULL
+
+      if (!is.null(subset_indices_reactive())) {
+        subset_indices <- subset_indices_reactive()$combined
+      } else {
+        subset_indices <- NULL
+      }
       
       # Robust check for function existence before calling
       if (is.function(values$lazy_data$get_obs_keys)) {
@@ -2800,7 +3190,7 @@ server <- function(input, output, session) {
           for (var in metadata_vars) {
               if (var %in% obs_keys) {
                   # Return the entire metadata column
-                  metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var))
+                  metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var, cells = subset_indices))
                   return(metadata_vals) # Return immediately once found
               }
           }
@@ -2816,13 +3206,20 @@ server <- function(input, output, session) {
   qc_main_data <- reactive({
       req(values$lazy_data, input$qc_plot_type)
       
-      n_obs <- nrow(values$lazy_data$df)
+
+      if (!is.null(subset_indices_reactive())) {
+        subset_indices <- subset_indices_reactive()$combined
+      } else {
+        subset_indices <- NULL
+      }
+
+      n_obs <- if (is.null(subset_indices)) nrow(values$lazy_data$df) else length(subset_indices)
 
       if (input$qc_plot_type == "scatter") {
           req(input$qc_x_metric, input$qc_y_metric, n_obs > 0)  # Guard against empty data
 
-          x <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_x_metric)
-          y <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_y_metric)
+          x <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_x_metric, cells = subset_indices)
+          y <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_y_metric, cells = subset_indices)
 
           if (is.null(x) || length(x) != n_obs) x <- rep(NA_real_, n_obs)
           if (is.null(y) || length(y) != n_obs) y <- rep(NA_real_, n_obs)
@@ -2833,7 +3230,7 @@ server <- function(input, output, session) {
           # Group
           group <- NULL
           if (!is.null(input$qc_group_by) && input$qc_group_by != "None") {
-            group <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by)
+            group <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by, cells = subset_indices)
           }
           if (is.null(group) || length(group) != n_obs) {
             group <- rep(NA_character_, n_obs)
@@ -2843,7 +3240,7 @@ server <- function(input, output, session) {
           # Color
           color_vals <- rep(0L, n_obs)
           if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
-            color_factors <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by)
+            color_factors <- values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by, cells = subset_indices)
             if (!is.null(color_factors) && length(color_factors) == n_obs) {
               color_vals <- as.integer(as.factor(color_factors)) - 1L
             }
@@ -2867,9 +3264,9 @@ server <- function(input, output, session) {
 
       } else if (input$qc_plot_type == "violin") {
           req(input$qc_metric, input$qc_group_by, n_obs > 0)
-          metric <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_metric))
-          group <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by))
-          
+          metric <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_metric, cells = subset_indices))
+          group <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by, cells = subset_indices))
+
           if (length(metric) != length(group)) {
               stop("Row length mismatch in violin data")
           }
@@ -2915,6 +3312,12 @@ server <- function(input, output, session) {
       
       dat <- qc_main_data()
 
+      if (!is.null(subset_indices_reactive())) {
+        subset_indices <- subset_indices_reactive()$combined
+      } else {
+        subset_indices <- NULL
+      }
+
       if (input$qc_plot_type == "violin") {
         # Prepare and send data for the violin plot
         datasets <- lapply(unique(dat$Group), function(g) {
@@ -2949,14 +3352,14 @@ server <- function(input, output, session) {
         # Check if the color_by variable exists and is not "None"
         if (!is.null(input$qc_color_by) && input$qc_color_by != "None") {
             # This is now safe because dat (from qc_main_data) is ready
-            color_levels <- levels(as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by)))
+            color_levels <- levels(as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_color_by, cells = subset_indices)))
         }
 
         # Retrieve metadata directly here
         metadata_vars <- c("celltype", "Annotation")
         for (var in metadata_vars) {
             if (var %in% categorical_vars()) { # Your fix is now safe to use here
-                metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var))
+                metadata_vals <- as.character(values$lazy_data$get_obs_column(values$lazy_data$z, var, cells = subset_indices))
                 break
             }
         }
@@ -2991,10 +3394,16 @@ server <- function(input, output, session) {
   output$qc_stats_table <- renderTable({
     req(values$lazy_data)
 
-    n_genes_col <- get_first_available_column(values$lazy_data, c("n_genes", "nGenes", "genes_count"))
-    total_counts_col <- get_first_available_column(values$lazy_data, c("total_counts", "totalUMIs"))
-    pct_mito_col <- get_first_available_column(values$lazy_data, c("pct_mito", "percent_mito", "mitochondrial_percent"))
-    pct_ribo_col <- get_first_available_column(values$lazy_data, c("pct_ribo", "percent_ribo", "ribosomal_percent"))
+    if (!is.null(subset_indices_reactive())) {
+      subset_indices <- subset_indices_reactive()$combined
+    } else {
+      subset_indices <- NULL
+    }
+
+    n_genes_col <- get_first_available_column(values$lazy_data, c("n_genes", "nGenes", "genes_count"))[subset_indices]
+    total_counts_col <- get_first_available_column(values$lazy_data, c("total_counts", "totalUMIs"))[subset_indices]
+    pct_mito_col <- get_first_available_column(values$lazy_data, c("pct_mito", "percent_mito", "mitochondrial_percent"))[subset_indices]
+    pct_ribo_col <- get_first_available_column(values$lazy_data, c("pct_ribo", "percent_ribo", "ribosomal_percent"))[subset_indices]
 
     obs_list <- list()
     if (!is.null(n_genes_col)) obs_list[["n_genes"]] <- n_genes_col
@@ -3027,6 +3436,14 @@ server <- function(input, output, session) {
   # Server logic for the enhanced filtering
   observe({
     req(values$lazy_data)
+
+    subset_indices <- isolate({
+      if (!is.null(subset_indices_reactive())) {
+        subset_indices_reactive()$combined
+      } else {
+        seq_len(nrow(values$lazy_data$df))
+      }
+    })
     
     # Get available columns from the dataset
     available_cols <- numeric_obs_keys()
@@ -3035,25 +3452,31 @@ server <- function(input, output, session) {
     updateSelectInput(session, "mito_var_select",
                     choices = c("Choose variable" = "", available_cols),
                     selected = get_first_available_column(values$lazy_data, 
-                                                              c("pct_mito", "percent_mito", "mitochondrial_percent", "percent.mt")))
+                                                              c("pct_mito", "percent_mito", "mitochondrial_percent", "percent.mt"))[subset_indices])
     
     updateSelectInput(session, "counts_var_select",
                     choices = c("Choose variable" = "", available_cols),
                     selected = get_first_available_column(values$lazy_data, 
-                                                              c("total_counts", "totalUMIs", "nCount_RNA", "nUMI")))
+                                                              c("total_counts", "totalUMIs", "nCount_RNA", "nUMI"))[subset_indices])
     
     updateSelectInput(session, "genes_var_select",
                     choices = c("Choose variable" = "", available_cols),
                     selected = get_first_available_column(values$lazy_data, 
-                                                              c("n_genes", "nGenes", "genes_count", "nFeature_RNA")))
+                                                              c("n_genes", "nGenes", "genes_count", "nFeature_RNA"))[subset_indices])
   })
 
   # Enhanced filter preview output
   output$filter_preview_enhanced <- renderText({
     req(values$lazy_data)
+
+    if (!is.null(subset_indices_reactive())) {
+      subset_indices <- subset_indices_reactive()$combined
+    } else {
+      subset_indices <- NULL
+    }
     
     # Get total number of cells
-    total_cells <- nrow(values$lazy_data$df)
+    total_cells <- if (is.null(subset_indices)) nrow(values$lazy_data$df) else length(subset_indices)
     
     # Initialize passing filter
     passing <- rep(TRUE, total_cells)
@@ -3061,7 +3484,7 @@ server <- function(input, output, session) {
     
     # Apply mitochondrial filter
     if (!is.null(input$mito_var_select) && input$mito_var_select != "") {
-      mito_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$mito_var_select)
+      mito_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$mito_var_select, cells = subset_indices)
       if (!is.null(mito_data) && !is.null(input$mito_min) && !is.null(input$mito_max)) {
         passing <- passing & (mito_data >= input$mito_min & mito_data <= input$mito_max)
         filters_applied <- c(filters_applied, 
@@ -3071,7 +3494,7 @@ server <- function(input, output, session) {
     
     # Apply counts filter
     if (!is.null(input$counts_var_select) && input$counts_var_select != "") {
-      counts_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$counts_var_select)
+      counts_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$counts_var_select, cells = subset_indices)
       if (!is.null(counts_data)) {
         counts_filter <- rep(TRUE, length(counts_data))
         
@@ -3101,7 +3524,7 @@ server <- function(input, output, session) {
     
     # Apply genes filter
     if (!is.null(input$genes_var_select) && input$genes_var_select != "") {
-      genes_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$genes_var_select)
+      genes_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$genes_var_select, cells = subset_indices)
       if (!is.null(genes_data)) {
         genes_filter <- rep(TRUE, length(genes_data))
         
@@ -3145,20 +3568,24 @@ server <- function(input, output, session) {
 
   output$qc_detailed_table <- DT::renderDataTable({
     req(values$lazy_data)
+
+    if (!is.null(subset_indices_reactive())) {
+      subset_indices <- subset_indices_reactive()$combined
+    } else {
+      subset_indices <- NULL
+    }
     
     # Get all obs column names
     all_cols <- values$lazy_data$obs_keys
     
     # Load each column lazily
     obs_list <- lapply(all_cols, function(colname) {
-      values$lazy_data$get_obs_column(values$lazy_data$z, colname)
+      values$lazy_data$get_obs_column(values$lazy_data$z, colname, cells = subset_indices)
     })
     names(obs_list) <- all_cols
     
     # Convert to data.frame
     obs_df <- as.data.frame(obs_list)
-    
-    # Optionally, you can format or subset obs_df here before showing
     
     DT::datatable(
       obs_df,
@@ -3208,7 +3635,7 @@ server <- function(input, output, session) {
     if (report_generation_status() == "ready") {
       downloadButton("download_report", "Download Report")
     } else {
-      actionButton("generate_report_button", "Generate Report")
+      actionButton("generate_report_button", "Generate Report", class = "btn btn-primary btn-sm")
     }
   })
 
@@ -3289,10 +3716,19 @@ server <- function(input, output, session) {
         }
         
         all_scatter_data <- list()
+
+        subset_indices <- isolate({
+          if (!is.null(subset_indices_reactive())) {
+            subset_indices_reactive()$combined
+          } else {
+            seq_len(nrow(values$lazy_data$df))
+          }
+        })
+
         print("Preparing scatter data for report...")
         if (!is.null(values) && !is.null(values$lazy_data) && !is.null(values$lazy_data$df)) {
           print("Lazy data and df found")
-          df <- values$lazy_data$df
+          df <- values$lazy_data$df[subset_indices, , drop = FALSE]
           if ("x" %in% colnames(df) && "y" %in% colnames(df)) {
             
             n_obs <- nrow(df)
@@ -3300,7 +3736,7 @@ server <- function(input, output, session) {
             # Annotations for main plot
             annotations <- NULL
             if (!is.null(input$colorBy) && !is.null(values$lazy_data$z)) {
-              annotations <- values$lazy_data$get_obs_column(values$lazy_data$z, input$colorBy)
+              annotations <- values$lazy_data$get_obs_column(values$lazy_data$z, input$colorBy, cells = subset_indices)
             }
             # Fallback or fix length mismatch
             if (is.null(annotations) || length(annotations) != n_obs) {
@@ -3321,7 +3757,7 @@ server <- function(input, output, session) {
             if (length(gene_keys) > 0) {
               for (gene in gene_keys) {
                 if (!is.null(plot_storage$canvases[[gene]])) {
-                  gene_annotations <- extract_gene_data_enhanced(gene, values$lazy_data, only_vector = TRUE)
+                  gene_annotations <- extract_gene_data_enhanced(gene, values$lazy_data, only_vector = TRUE)[subset_indices]
 
                   # Force correct length
                   if (is.null(gene_annotations) || length(gene_annotations) != n_obs) {
