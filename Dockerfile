@@ -30,7 +30,8 @@ RUN micromamba create -y -n shiny_app_env -f /tmp/env.yml && \
 RUN micromamba run -n shiny_app_env R -e "install.packages(c('peakRAM', 'remotes'), repos='https://cloud.r-project.org')"
 
 # Install your GitHub package using remotes
-RUN micromamba run -n shiny_app_env R -e "remotes::install_github('george123ya/reglScatterplotR', dependencies=TRUE)"
+RUN micromamba run -n shiny_app_env R -e "remotes::install_github('george123ya/reglScatterplotR', ref='HEAD', dependencies=TRUE, upgrade='always', force=TRUE)" && \
+    micromamba run -n shiny_app_env R -e "cat('Installed reglScatterplot commit: ', packageDescription('reglScatterplot')\$RemoteSha, '\n')"
 
 # Copy Shiny app code
 COPY . /home/shiny-app

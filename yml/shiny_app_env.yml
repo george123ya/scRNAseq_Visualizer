@@ -1,9 +1,10 @@
 name: shiny_app_env
 channels:
+  - bioconda
   - conda-forge
 dependencies:
-  - python=3.11
-  - r-base
+  - r-base=4.3
+  - bioconductor-complexheatmap=2.18.0
   - r-shiny
   - r-shinyjs
   - r-shinydashboard
@@ -23,7 +24,6 @@ dependencies:
   - r-reshape2
   - r-shinywidgets
   - r-cairo
-  - bioconda::bioconductor-complexheatmap
   - pip
   - zlib 
   - requests

@@ -37,6 +37,7 @@ suppressPackageStartupMessages({
   library(xml2)
   library(peakRAM)
   library(reshape2)
+  library(rlang)
 })
 
 # Source global configurations and helper functions
@@ -45,9 +46,9 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-# use_condaenv("sc_rna_env_python2", required = TRUE)
+use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-use_condaenv("shiny_app_env", required = TRUE)
+# use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
@@ -2501,7 +2502,7 @@ server <- function(input, output, session) {
       showAxes = FALSE,
       showTooltip = TRUE,
       opacity = 0.8,
-      backgroundColor = "transparent",
+      backgroundColor = "white",
       legend_title = ud$colorBy,
       enableDownload = TRUE,
     )
