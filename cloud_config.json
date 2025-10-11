@@ -1,0 +1,8 @@
+{
+  "folders": [
+    "https://storage.googleapis.com/scrna-seqbrowser/"
+  ],
+  "urls": [
+    "https://rubioinformatics.s3.us-east-1.amazonaws.com/Test_zarr/corrected_doublet_decontX_mt_Duo_allergy.zarr"
+  ]
+}

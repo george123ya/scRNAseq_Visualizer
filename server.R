@@ -46,9 +46,9 @@ source("modules/utils.R")
 
 # Configure Python environment for scanpy/anndata
 
-use_condaenv("sc_rna_env_python2", required = TRUE)
+# use_condaenv("sc_rna_env_python2", required = TRUE)
 # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-# use_condaenv("shiny_app_env", required = TRUE)
+use_condaenv("shiny_app_env", required = TRUE)
 
 reticulate::py_run_string("
 import zarr
@@ -1221,24 +1221,50 @@ get_dataset_info_smart <- function(lazy_data) {
     total_size / (1024^2)  # in MB
   }
 
-  
-  # Safely get file size
+  # Safely get file or dataset size in megabytes for local paths or various cloud URLs
   get_dataset_size_mb <- function(path_or_url) {
     tryCatch({
-      if (grepl("^https://storage\\.googleapis\\.com/", path_or_url)) {
-        # Cloud Zarr
-        base_url <- "https://storage.googleapis.com/scrna-seqbrowser/"
-        zarr_name <- sub(".*/", "", path_or_url)
-        get_cloud_size_mb(base_url, zarr_name)
+      if (grepl("^https?://", path_or_url)) {
+        if (grepl("storage\\.googleapis\\.com", path_or_url)) {
+          base_url <- sub("/[^/]*$", "/", path_or_url)
+          resource_name <- sub(".*/", "", path_or_url)
+          get_cloud_size_mb(base_url, resource_name)
+        } else if (grepl("\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com", path_or_url)) {
+          base_url <- sub("/[^/]*$", "/", path_or_url)
+          resource_name <- sub(".*/", "", path_or_url)
+          get_cloud_size_mb(base_url, resource_name)
+        } else if (grepl("\\.blob\\.core\\.windows\\.net", path_or_url)) {
+          base_url <- sub("/[^/]*$", "/", path_or_url)
+          resource_name <- sub(".*/", "", path_or_url)
+          get_cloud_size_mb(base_url, resource_name)
+        } else {
+          get_generic_url_size_mb(path_or_url)
+        }
       } else {
-        # Local file or folder
         get_local_size_mb(path_or_url)
       }
     }, error = function(e) {
-      cat("⚠️ Error getting file size:", e$message, "\n")
+      cat("⚠️ Error getting size:", e$message, "\n")
       0
     })
   }
+
+  # Placeholder for generic URL size fetching
+  get_generic_url_size_mb <- function(url) {
+    require(httr)
+    response <- HEAD(url)
+    if (status_code(response) == 200) {
+      size_bytes <- as.numeric(headers(response)$`content-length`)
+      if (is.na(size_bytes)) {
+        stop("Content-Length header not available")
+      }
+      size_mb <- size_bytes / (1024 * 1024)  # Convert bytes to MB
+      return(size_mb)
+    } else {
+      stop("Failed to retrieve size from URL")
+    }
+  }
+
 
   file_size_mb <- get_dataset_size_mb(lazy_data$file_path)
   file_size_mb <- round(file_size_mb, 2)
@@ -1273,33 +1299,115 @@ get_dataset_info_smart <- function(lazy_data) {
 }
 
 get_top_level_zarr <- function(base_url) {
-  zarr_files <- c()
-  marker <- NULL
-  
-  repeat {
-    url <- if (!is.null(marker)) {
-      paste0(base_url, "?marker=", URLencode(marker, reserved = TRUE))
+  tryCatch({
+    zarr_files <- c()
+    marker <- NULL
+    
+    # Normalize base_url to ensure it ends with "/"
+    if (!grepl("/$", base_url)) base_url <- paste0(base_url, "/")
+    
+    # Determine provider and set query parameters
+    if (grepl("storage\\.googleapis\\.com", base_url)) {
+      # Google Cloud Storage (restore original logic)
+      repeat {
+        url <- if (!is.null(marker)) {
+          paste0(base_url, "?marker=", URLencode(marker, reserved = TRUE))
+        } else {
+          base_url
+        }
+        
+        doc <- read_xml(url)  # Use original read_xml for GCS
+        ns <- xml_ns(doc)
+        keys <- xml_text(xml_find_all(doc, ".//d1:Key", ns))
+        
+        # Keep only base Zarr names
+        zarr_base <- sub("^(.+?\\.zarr).*", "\\1", keys)
+        zarr_base <- zarr_base[grepl("\\.zarr$", zarr_base)]
+        
+        zarr_files <- unique(c(zarr_files, zarr_base))
+        
+        truncated <- xml_text(xml_find_first(doc, ".//d1:IsTruncated", ns)) == "true"
+        if (!truncated) break
+        
+        marker <- xml_text(xml_find_first(doc, ".//d1:NextMarker", ns))
+        if (is.na(marker) || marker == "") break
+      }
+      
+    } else if (grepl("\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com", base_url)) {
+      # AWS S3
+      repeat {
+        query <- list(
+          "list-type" = "2",
+          delimiter = "/"
+        )
+        if (!is.null(marker)) {
+          query$`continuation-token` <- marker
+        }
+        
+        response <- GET(base_url, query = query)
+        if (status_code(response) != 200) {
+          stop(sprintf("Failed to list S3 bucket: %s", status_code(response)))
+        }
+        
+        doc <- read_xml(content(response, as = "text"))
+        ns <- xml_ns(doc)
+        keys <- xml_text(xml_find_all(doc, ".//d1:Key", ns))
+        
+        # Keep only base Zarr names
+        zarr_base <- sub("^(.+?\\.zarr).*", "\\1", keys)
+        zarr_base <- zarr_base[grepl("\\.zarr$", zarr_base)]
+        
+        zarr_files <- unique(c(zarr_files, zarr_base))
+        
+        truncated <- xml_text(xml_find_first(doc, ".//d1:IsTruncated", ns)) == "true"
+        if (!truncated) break
+        
+        marker <- xml_text(xml_find_first(doc, ".//d1:NextContinuationToken", ns))
+        if (is.na(marker) || marker == "") break
+      }
+      
+    } else if (grepl("\\.blob\\.core\\.windows\\.net", base_url)) {
+      # Azure Blob Storage
+      repeat {
+        query <- list(
+          restype = "container",
+          comp = "list",
+          delimiter = "/"
+        )
+        if (!is.null(marker)) {
+          query$marker <- marker
+        }
+        
+        response <- GET(base_url, query = query)
+        if (status_code(response) != 200) {
+          stop(sprintf("Failed to list Azure container: %s", status_code(response)))
+        }
+        
+        doc <- read_xml(content(response, as = "text"))
+        ns <- xml_ns(doc)
+        keys <- xml_text(xml_find_all(doc, ".//d1:Name", ns))
+        
+        # Keep only base Zarr names
+        zarr_base <- sub("^(.+?\\.zarr).*", "\\1", keys)
+        zarr_base <- zarr_base[grepl("\\.zarr$", zarr_base)]
+        
+        zarr_files <- unique(c(zarr_files, zarr_base))
+        
+        marker <- xml_text(xml_find_first(doc, ".//d1:NextMarker", ns))
+        truncated <- !is.na(marker) && marker != ""
+        if (!truncated) break
+      }
+      
     } else {
-      base_url
+      stop("Unsupported cloud provider")
     }
     
-    doc <- read_xml(url)
-    ns <- xml_ns(doc)
-    keys <- xml_text(xml_find_all(doc, ".//d1:Key", ns))
+    return(zarr_files)
     
-    # Keep only base zarr names
-    zarr_base <- sub("^(.+?\\.zarr).*", "\\1", keys)
-    zarr_base <- zarr_base[grepl("\\.zarr$", zarr_base)]
-    
-    zarr_files <- unique(c(zarr_files, zarr_base))
-    
-    truncated <- xml_text(xml_find_first(doc, ".//d1:IsTruncated", ns)) == "true"
-    if (!truncated) break
-    
-    marker <- xml_text(xml_find_first(doc, ".//d1:NextMarker", ns))
-  }
-  
-  zarr_files
+  }, error = function(e) {
+    cat("⚠️ Error listing Zarr datasets:", e$message, "\n")
+    character()
+  })
 }
 
 # Helper: get first existing obs column from a list of possible names
@@ -1411,14 +1519,44 @@ server <- function(input, output, session) {
       display_names <- gsub("\\.(h5ad|h5)$", "", basename(display_names))
       local_choices <- setNames(local_files, display_names)
     }
+
+    # Load cloud configuration
+    load_cloud_config <- function(config_file = "cloud_config.json") {
+      if (file.exists(config_file)) {
+        config <- fromJSON(config_file)
+        return(config)
+      } else {
+        warning("Config file not found, using default empty config")
+        return(list(folders = character(), urls = character()))
+      }
+    }
+
+    config <- load_cloud_config("cloud_config.json")
     
-    # Prepare cloud choices — friendly label, full URL value
+    # Cloud folders and Zarr datasets
     cloud_choices <- NULL
-    if (length(cloud_files) > 0) {
-      cloud_choices <- setNames(
-        paste0("https://storage.googleapis.com/scrna-seqbrowser/", cloud_files),
-        paste0("[Cloud] ", cloud_files)
-      )
+    if (length(config$folders) > 0) {
+      for (folder_url in config$folders) {
+        cloud_files <- get_top_level_zarr(folder_url)
+        if (length(cloud_files) > 0) {
+          provider <- if (grepl("storage\\.googleapis\\.com", folder_url)) "GCS"
+                    else if (grepl("\\.s3\\.", folder_url)) "S3"
+                    else if (grepl("\\.blob\\.core\\.windows\\.net", folder_url)) "Azure"
+                    else "Cloud"
+          cloud_choices <- c(cloud_choices, setNames(
+            paste0(folder_url, cloud_files),
+            paste0("[", provider, "] ", cloud_files)
+          ))
+        }
+      }
+    }
+    
+    # Predefined cloud URLs from config
+    if (length(config$urls) > 0) {
+      cloud_choices <- c(cloud_choices, setNames(
+        config$urls,
+        paste0("[Predefined] ", basename(config$urls))
+      ))
     }
     
     # Combine into grouped list

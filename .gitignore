@@ -31,3 +31,8 @@ processed_data/
 
 # Shiny logs
 *.log
+
+# Except for this file
+!cloud_config.json
+
+
