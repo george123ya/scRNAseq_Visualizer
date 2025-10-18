@@ -2350,18 +2350,18 @@ function processGeneExpressionData(expressionData) {
   }
 }
 
-function updateActiveGeneExpressionCache() {
-  geneExpressionCache.clear();
+// function updateActiveGeneExpressionCache() {
+//   geneExpressionCache.clear();
   
-  // Original or MAGIC depending on isMAGICActive
-  const sourceCache = isMAGICActive ? geneExpressionMAGIC : geneExpressionOriginal;
+//   // Original or MAGIC depending on isMAGICActive
+//   const sourceCache = isMAGICActive ? geneExpressionMAGIC : geneExpressionOriginal;
 
-  sourceCache.forEach((geneData, geneName) => {
-    geneExpressionCache.set(geneName, geneData);
-  });
+//   sourceCache.forEach((geneData, geneName) => {
+//     geneExpressionCache.set(geneName, geneData);
+//   });
 
-  console.log(`Active cache updated with ${isMAGICActive ? "MAGIC" : "original"} expression data`);
-}
+//   console.log(`Active cache updated with ${isMAGICActive ? "MAGIC" : "original"} expression data`);
+// }
 
 // Add a global setting for vmax mode
 let vmaxMode = 'p90'; // Options: 'max', 'p90', 'p95', 'p99'
@@ -2789,16 +2789,65 @@ Shiny.addCustomMessageHandler('colorByChange', async function(message) {
 //   redrawMainPlot(currentAnnotation);
 // });
 
-// Modify the existing geneSearchChange handler
+// Global variable to track the active layer
+let activeLayer = 'X'; // Default layer
+
+// New handler for layer changes
+Shiny.addCustomMessageHandler('updateLayer', function(message) {
+  console.log(`Updating layer to: ${message.layer}`);
+  
+  activeLayer = message.layer;
+  
+  // Update coordinates based on the selected layer
+  let coordSource;
+  if (activeLayer === 'MAGIC') {
+    coordSource = pointsMAGIC;
+    console.log('Using MAGIC coordinates');
+  } else {
+    coordSource = pointsXY; // Default to X or other layer coordinates
+    console.log(`Using coordinates for layer: ${activeLayer}`);
+  }
+  
+  // Update points array with new coordinates
+  for (let i = 0; i < points.length; i++) {
+    points[i][0] = coordSource[i][0]; // Replace x
+    points[i][1] = coordSource[i][1]; // Replace y
+  }
+  
+  // Update filteredPoints
+  filteredPoints = filterPoints();
+  
+  // Update gene expression cache based on layer
+  updateActiveGeneExpressionCache();
+  
+  // Check if expression data is available for the layer
+  if (activeLayer === 'MAGIC' && geneExpressionMAGIC.size === 0) {
+    console.warn(`No expression data available for layer: ${activeLayer}`);
+  }
+  
+  // Enable transition for smooth animation
+  useTransition = true;
+  
+  // Redraw all plots with new coordinates and expression data
+  redrawAllPlots(mainAnnotation);
+  
+  // Reset transition after animation
+  setTimeout(() => {
+    useTransition = false;
+    console.log(`Layer transition to ${activeLayer} completed`);
+  }, 1500);
+});
+
+// Modified geneSearchChange handler
 Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
   console.log("Gene search change message:", message);
 
-  // --- Normalize gene names to always be an array ---
+  // Normalize gene names to always be an array
   const geneNames = message.genes 
     ? (Array.isArray(message.genes) ? message.genes : [message.genes])
     : [];
 
-  // --- Normalize expression data and its genes ---
+  // Normalize expression data and its genes
   const expressionData = message.expression_data || {};
   expressionData.genes = expressionData.genes 
     ? (Array.isArray(expressionData.genes) ? expressionData.genes : [expressionData.genes])
@@ -2807,7 +2856,7 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
   console.log("Processed gene names:", geneNames);
   console.log("Expression data:", expressionData);
 
-  // --- Process both original and MAGIC gene expression data ---
+  // Process both original and MAGIC gene expression data
   processGeneExpressionData(expressionData);
 
   console.log("Active genes before update:", Array.from(activeGeneExpressions));
@@ -2819,7 +2868,7 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
 
   console.log("New genes to process:", Array.from(newGenes));
 
-  // --- Remove deselected genes ---
+  // Remove deselected genes
   for (const gene of Array.from(activeGeneExpressions)) {
     if (!newGenes.has(gene)) {
       console.log(`Removing gene: ${gene}`);
@@ -2828,18 +2877,17 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
     }
   }
 
-  // --- Add new genes (with duplicate protection) ---
+  // Add new genes (with duplicate protection)
   const genesToAdd = [];
   for (const gene of newGenes) {
-    if (!activeGeneExpressions.has(gene) && !genePlots[gene]) { // Extra check to prevent duplicates
-      // Check if we have data in either original or MAGIC cache
-      const hasOriginal = geneExpressionOriginal.has(gene);
-      const hasMAGIC = geneExpressionMAGIC.has(gene);
+    if (!activeGeneExpressions.has(gene) && !genePlots[gene]) {
+      // Check if we have data in the active layer's cache
+      const hasData = geneExpressionCache.has(gene);
       
-      if (hasOriginal || hasMAGIC) {
-        console.log(`Adding gene: ${gene} (Original: ${hasOriginal}, MAGIC: ${hasMAGIC})`);
+      if (hasData) {
+        console.log(`Adding gene: ${gene} for layer: ${activeLayer}`);
       } else {
-        console.warn(`No expression data for gene: ${gene}`);
+        console.warn(`No expression data for gene: ${gene} in layer: ${activeLayer}`);
       }
       activeGeneExpressions.add(gene);
       genesToAdd.push(gene);
@@ -2848,7 +2896,7 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
     }
   }
 
-  // --- Create plots for new genes (view inheritance happens inside createGenePlot) ---
+  // Create plots for new genes
   console.log(`About to create ${genesToAdd.length} new gene plots:`, genesToAdd);
   const createPromises = genesToAdd.map(gene => createGenePlot(gene));
 
@@ -2860,21 +2908,19 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
       createSyncButton();
     }
 
-    // Draw the gene plots with data
+    // Draw the gene plots with data from the active layer
     genesToAdd.forEach(gene => {
-      console.log(`Drawing data for gene plot: ${gene}`);
+      console.log(`Drawing data for gene plot: ${gene} in layer: ${activeLayer}`);
       redrawGenePlot(gene);
     });
 
-    // COMPLETELY AVOID sync setup during creation
-    // Sync will only happen when user manually toggles the sync button
     console.log(`Current sync mode state: ${isSyncMode}`);
     console.log("View inheritance complete - plots are now independent unless sync is manually enabled");
 
     updatePlotLayout();
   });
 
-  // --- Cleanup if no genes are active ---
+  // Cleanup if no genes are active
   if (activeGeneExpressions.size === 0) {
     console.log("No active genes left. Clearing legends and sync button.");
     removeSyncButton();
@@ -2882,6 +2928,20 @@ Shiny.addCustomMessageHandler('geneSearchChange', function(message) {
     clearAllSyncHandlers();
   }
 });
+
+// Updated active gene expression cache based on layer
+function updateActiveGeneExpressionCache() {
+  geneExpressionCache.clear();
+  
+  // Select source cache based on activeLayer
+  const sourceCache = activeLayer === 'MAGIC' ? geneExpressionMAGIC : geneExpressionOriginal;
+
+  sourceCache.forEach((geneData, geneName) => {
+    geneExpressionCache.set(geneName, geneData);
+  });
+
+  console.log(`Active cache updated with ${activeLayer} expression data`);
+}
 
 // **NEW: Helper function to manually sync all gene plots to main plot view**
 function syncAllGenePlotViewsToMain() {

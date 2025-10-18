@@ -304,6 +304,7 @@ process_zarr_data_fast <- function(z, file_path) {
   
   # Create fast access functions
   get_obs_column_fast <- function(z, name, cells = NULL) {
+
       to_r <- reticulate::py_to_r
       builtins <- reticulate::import_builtins()
       
@@ -316,6 +317,8 @@ process_zarr_data_fast <- function(z, file_path) {
       if (!(name %in% obs_keys)) return(NULL)
       
       col_obj <- z[["obs"]][[name]]
+
+      # print(paste("Cells:", length(cells)))
       
       tryCatch({
         zarr <- import("zarr")
@@ -328,9 +331,14 @@ process_zarr_data_fast <- function(z, file_path) {
         if (is_group) {
           full_codes <- to_r(col_obj[['codes']][])
           full_categories <- to_r(col_obj[['categories']][])
-          
-          # Map full codes to categories
-          full_col <- full_categories[full_codes + 1]
+
+          full_col <- vapply(
+            full_codes,
+            function(code) {
+              if (code < 0) NA_character_ else full_categories[code + 1]
+            },
+            FUN.VALUE = character(1)
+          )
         } else {
           full_col <- to_r(col_obj[])
         }
@@ -341,8 +349,12 @@ process_zarr_data_fast <- function(z, file_path) {
         } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= length(full_col))) {
           return(full_col[cells])
         } else {
-          cat("⚠️ Invalid cells argument: must be NULL, 'all', or a valid list of 1-based indices\n")
-          return(full_col)  # Fallback to full
+          cat("1")
+          cat("⚠️ Invalid cells argument of length", length(cells), "\n")
+          cat("Min / Max", min(cells), "/", max(cells), "\n")
+          cat("nrow full_col:", length(full_col), "\n")
+          valid_cells <- intersect(cells, seq_along(full_col))
+          return(full_col[valid_cells])
         }
       }, error = function(e) {
         cat("⚠️ Error loading obs column", name, ":", e$message, "\n")
@@ -382,6 +394,7 @@ process_zarr_data_fast <- function(z, file_path) {
         } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= length(full_expr_vec))) {
           return(full_expr_vec[cells])
         } else {
+          cat("2")
           cat("⚠️ Invalid cells argument: must be NULL, 'all', or a valid list of 1-based indices\n")
           return(full_expr_vec)  # Fallback to full
         }
@@ -392,7 +405,8 @@ process_zarr_data_fast <- function(z, file_path) {
   }
   
   get_genes_expression_batch <- function(gene_names, layer = "X", cells = NULL) {
-      gene_indices <- match(gene_names, gene_info$display_names)
+      
+      gene_indices <- match(gene_names, toupper(gene_info$display_names))
       valid_mask <- !is.na(gene_indices)
       valid_indices <- as.integer(gene_indices[valid_mask] - 1)  # Ensure integer indices
       valid_genes <- gene_names[valid_mask]
@@ -417,6 +431,7 @@ process_zarr_data_fast <- function(z, file_path) {
         } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= nrow(full_expr_mat))) {
           return(full_expr_mat[cells, ])
         } else {
+          cat("3")
           cat("⚠️ Invalid cells argument: must be NULL, 'all', or a valid list of 1-based indices\n")
           return(full_expr_mat)  # Fallback to full
         }
@@ -1821,6 +1836,11 @@ server <- function(input, output, session) {
   observeEvent(list(input$geneSearch, matrix_for_viz()), {
     req(values$lazy_data)
     
+    # Send layer change to JavaScript
+    session$sendCustomMessage("updateLayer", list(
+      layer = matrix_for_viz()
+    ))
+    
     if (!is.null(input$geneSearch) && length(input$geneSearch) > 0) {
       gene_list <- as.character(input$geneSearch)
       
@@ -1831,19 +1851,19 @@ server <- function(input, output, session) {
       output$status <- renderText(loading_msg)
       session$sendCustomMessage("showSpinner", TRUE)
       
-      # Use improved smart extraction
+      # Extract gene data for the selected layer
       gene_data <- extract_gene_data_enhanced(gene_list, values$lazy_data, use_layer = matrix_for_viz())
       print(paste("Expr extracted from layer:", matrix_for_viz()))
-
-      session$sendCustomMessage("showSpinner", FALSE)  
+      
+      session$sendCustomMessage("showSpinner", FALSE)
       session$sendCustomMessage("geneSearchChange", list(
         genes = gene_list,
         expression_data = gene_data
       ))
-
+      
       # Keep 'main', clear the rest
       plot_storage$canvases <- plot_storage$canvases["main"]
-
+      
       # Update with current gene_list
       for (gene in gene_list) {
         plot_storage$canvases[[gene]] <- TRUE
@@ -1872,6 +1892,8 @@ server <- function(input, output, session) {
       }
     }
   }, ignoreNULL = FALSE)
+
+
 
 
   # --- MAGIC Visual ---
@@ -2633,7 +2655,7 @@ server <- function(input, output, session) {
       x = "x",
       y = "y",
       colorBy = ud$colorBy,
-      # size = 1.5,
+      size = log(length(ud$colorBy)) + 6,
       continuous_palette = "inferno",
       xlab = "UMAP 1",
       ylab = "UMAP 2",
@@ -3405,6 +3427,11 @@ server <- function(input, output, session) {
           req(input$qc_metric, input$qc_group_by, n_obs > 0)
           metric <- as.numeric(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_metric, cells = subset_indices))
           group <- as.factor(values$lazy_data$get_obs_column(values$lazy_data$z, input$qc_group_by, cells = subset_indices))
+
+          # check NAs indices in both metric and group and remove them
+          na_indices <- is.na(metric) | is.na(group)
+          metric <- metric[!na_indices]
+          group <- group[!na_indices]
 
           if (length(metric) != length(group)) {
               stop("Row length mismatch in violin data")

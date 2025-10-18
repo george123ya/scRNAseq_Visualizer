@@ -199,13 +199,13 @@ ui <- fluidPage(
             #   )
             # ),
             uiOutput("colorByUI"),
-            div(class = "mt-2",
-              checkboxInput("activateMAGIC", 
-                HTML("<strong>🪄 MAGIC Imputation</strong>"), 
-                value = FALSE),
-              tags$small(class = "text-muted", 
-                "Note: For visualization only, not for statistical analysis")
-            ),
+            # div(class = "mt-2",
+            #   checkboxInput("activateMAGIC", 
+            #     HTML("<strong>🪄 MAGIC Imputation</strong>"), 
+            #     value = FALSE),
+            #   tags$small(class = "text-muted", 
+            #     "Note: For visualization only, not for statistical analysis")
+            # ),
             uiOutput("chooseMatrixUI")
           )
         )
