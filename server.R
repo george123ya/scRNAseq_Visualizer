@@ -38,17 +38,37 @@ suppressPackageStartupMessages({
   library(peakRAM)
   library(reshape2)
   library(rlang)
+  library(promises)
+  library(redux)
+  library(future)
+  library(future.redis)
+  library(arrow)
 })
 
+# future::plan(multisession)
 # Source global configurations and helper functions
 source("global.R")
 source("modules/utils.R")
 
+
+
 # Configure Python environment for scanpy/anndata
 
 # use_condaenv("sc_rna_env_python2", required = TRUE)
-# use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-use_condaenv("shiny_app_env", required = TRUE)
+source_python("./scripts/rank_genes_zarr.py")  # Load ONCE at startup
+use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
+# use_condaenv("shiny_app_env", required = TRUE)
+
+# Enable direct S3 reads (no fsspec, no Python)
+Sys.setenv(
+  ARROW_S3_ALLOW_UNSAFE_URLS = "true",
+  AWS_EC2_METADATA_DISABLED = "true"  # speeds up S3 client init
+)
+
+# Optional: If you use public buckets (no credentials)
+s3_bucket_opts <- S3FileSystem$create(
+  anonymous = TRUE
+)
 
 reticulate::py_run_string("
 import zarr
@@ -304,63 +324,67 @@ process_zarr_data_fast <- function(z, file_path) {
   
   # Create fast access functions
   get_obs_column_fast <- function(z, name, cells = NULL) {
-
-      to_r <- reticulate::py_to_r
-      builtins <- reticulate::import_builtins()
+    to_r <- reticulate::py_to_r
+    builtins <- reticulate::import_builtins()
+    
+    if (!inherits(z, "python.builtin.object")) stop("⚠️ z is not a Python object.")
+    
+    root_keys <- to_r(builtins$list(z$keys()))
+    if (!("obs" %in% root_keys)) return(NULL)
+    
+    obs_keys <- to_r(builtins$list(z[["obs"]]$keys()))
+    if (!(name %in% obs_keys)) return(NULL)
+    
+    col_obj <- z[["obs"]][[name]]
+    
+    tryCatch({
+      zarr <- reticulate::import("zarr")
+      py$col_obj <- col_obj
+      py$zarr <- zarr
       
-      if (!inherits(z, "python.builtin.object")) stop("⚠️ z is not a Python object.")
+      is_group <- reticulate::py_eval("isinstance(col_obj, zarr.Group)")
+      full_col <- NULL
       
-      root_keys <- to_r(builtins$list(z$keys()))
-      if (!("obs" %in% root_keys)) return(NULL)
-      
-      obs_keys <- to_r(builtins$list(z[["obs"]]$keys()))
-      if (!(name %in% obs_keys)) return(NULL)
-      
-      col_obj <- z[["obs"]][[name]]
-
-      # print(paste("Cells:", length(cells)))
-      
-      tryCatch({
-        zarr <- import("zarr")
-        py$col_obj <- col_obj
-        py$zarr <- zarr
+      if (is_group) {
+        full_codes <- to_r(col_obj[['codes']][])
+        full_categories <- to_r(col_obj[['categories']][])
         
-        is_group <- py_eval("isinstance(col_obj, zarr.Group)")
-        full_col <- NULL
-        
-        if (is_group) {
-          full_codes <- to_r(col_obj[['codes']][])
-          full_categories <- to_r(col_obj[['categories']][])
-
+        # infer whether categories are numeric or character
+        if (is.numeric(full_categories) && length(unique(full_categories)) < 30) {
+          # treat as numeric factor
           full_col <- vapply(
             full_codes,
-            function(code) {
-              if (code < 0) NA_character_ else full_categories[code + 1]
-            },
-            FUN.VALUE = character(1)
+            function(code) if (code < 0) NA_real_ else full_categories[code + 1],
+            FUN.VALUE = numeric(1)
           )
         } else {
-          full_col <- to_r(col_obj[])
+          # treat as character factor
+          full_col <- vapply(
+            full_codes,
+            function(code) if (code < 0) NA_character_ else as.character(full_categories[code + 1]),
+            FUN.VALUE = character(1)
+          )
         }
-        
-        # Handle cell subsetting
-        if (is.null(cells) || identical(cells, "all")) {
-          return(full_col)
-        } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= length(full_col))) {
-          return(full_col[cells])
-        } else {
-          cat("1")
-          cat("⚠️ Invalid cells argument of length", length(cells), "\n")
-          cat("Min / Max", min(cells), "/", max(cells), "\n")
-          cat("nrow full_col:", length(full_col), "\n")
-          valid_cells <- intersect(cells, seq_along(full_col))
-          return(full_col[valid_cells])
-        }
-      }, error = function(e) {
-        cat("⚠️ Error loading obs column", name, ":", e$message, "\n")
-        return(NULL)
-      })
+      } else {
+        full_col <- to_r(col_obj[])
+      }
+      
+      # handle cell subsetting
+      if (is.null(cells) || identical(cells, "all")) {
+        return(full_col)
+      } else if (is.numeric(cells) && all(cells >= 1) && all(cells <= length(full_col))) {
+        return(full_col[cells])
+      } else {
+        cat("⚠️ Invalid cells argument of length", length(cells), "\n")
+        valid_cells <- intersect(cells, seq_along(full_col))
+        return(full_col[valid_cells])
+      }
+    }, error = function(e) {
+      cat("⚠️ Error loading obs column", name, ":", e$message, "\n")
+      return(NULL)
+    })
   }
+
   
   get_gene_expression_fast <- function(gene_name, layer = "X", cells = NULL) {
       gene_idx <- match(gene_name, gene_info$display_names)
@@ -1436,10 +1460,123 @@ get_first_available_column <- function(lazy_data, possible_names) {
   return(NULL)
 }
 
+show_prefix_modal <- function() {
+  modalDialog(
+    title = "Version prefix (optional)",
+    textInput("version_prefix_input",
+              label = "Prefix (e.g. my_analysis)",
+              placeholder = "Leave blank for auto-date"),
+    footer = tagList(
+      modalButton("Cancel"),
+      actionButton("prefix_ok", "OK", class = "btn-primary")
+    ),
+    easyClose = FALSE,
+    fade = TRUE
+  )
+}
+
 
 # Fixed server function with proper initialization
 
 server <- function(input, output, session) {
+
+  volcano_selected_indices <- reactiveVal(integer(0))
+  volcano_updating_from_plot <- reactiveVal(FALSE)
+  volcano_updating_from_table <- reactiveVal(FALSE)
+  volcano_table_data <- reactiveVal(NULL)
+
+  # Helper function for preparing the table data (outside the server function)
+  prepare_volcano_table <- function(df, selected_indices, mode, max_rows = 1000) {
+    cat("\n=== prepare_volcano_table DEBUG ===\n")
+    cat("Mode:", mode, "\n")
+    cat("Selected indices:", paste(head(selected_indices, 10), collapse = ", "), "\n")
+    
+    # Add original row index for mapping selection back to full data
+    df$original_index <- seq_len(nrow(df))
+    
+    # Add significance score for sorting
+    if (!"significance_score" %in% colnames(df)) {
+      df$significance_score <- df$neg_log10_padj * abs(df$logfoldchanges)
+    }
+    
+    # 1. Filter and sort
+    if (mode == "selected") {
+      if (length(selected_indices) > 0) {
+        display_df <- df[selected_indices, ]
+      } else {
+        display_df <- df[FALSE, ]
+      }
+      display_df <- display_df[order(-display_df$neg_log10_padj), ]
+      
+    } else { # mode == "all"
+      df_sorted <- df[order(-df$significance_score), ]
+      is_selected <- df_sorted$original_index %in% selected_indices
+      selected_genes <- df_sorted[is_selected, ]
+      unselected_genes <- df_sorted[!is_selected, ]
+      
+      n_selected <- nrow(selected_genes)
+      n_top_unselected <- max_rows - n_selected
+      
+      if (n_top_unselected > 0) {
+        top_unselected <- head(unselected_genes, n_top_unselected)
+        display_df <- rbind(selected_genes, top_unselected)
+      } else {
+        display_df <- selected_genes
+      }
+      
+      display_df$is_selected <- display_df$original_index %in% selected_indices
+      display_df <- display_df[order(-display_df$is_selected, -display_df$neg_log10_padj), ]
+    }
+    
+    cat("Display_df rows:", nrow(display_df), "\n")
+    cat("First gene:", display_df$gene[1], "\n")
+    cat("First log2FC:", display_df$logfoldchanges[1], "\n")
+    cat("First selected status:", display_df$original_index[1] %in% selected_indices, "\n")
+    
+    # 2. Build display data frame step by step
+    gene_col <- as.character(display_df$gene)
+    sel_col <- display_df$original_index %in% selected_indices
+    log2fc_col <- round(display_df$logfoldchanges, 3)
+    pval_col <- formatC(display_df$pvals_adj, format = "e", digits = 2)
+    neglog10_col <- round(display_df$neg_log10_padj, 2)
+    status_col <- as.character(display_df$significant)
+    
+    cat("Column lengths - Gene:", length(gene_col), "Sel:", length(sel_col), 
+        "log2FC:", length(log2fc_col), "\n")
+    cat("First 3 Sel values:", sel_col[1:3], "\n")
+    cat("First 3 log2FC values:", log2fc_col[1:3], "\n")
+    
+    # Create data frame explicitly
+    display_cols <- data.frame(
+      Gene = gene_col,
+      Sel = sel_col,
+      log2FC = log2fc_col,
+      pvalue = pval_col,
+      neglog10p = neglog10_col,
+      Status = status_col,
+      stringsAsFactors = FALSE
+    )
+    
+    cat("Data frame created, dimensions:", nrow(display_cols), "x", ncol(display_cols), "\n")
+    cat("Column names:", paste(names(display_cols), collapse = ", "), "\n")
+    cat("First row:\n")
+    print(display_cols[1, ])
+    
+    # Rename columns for display
+    names(display_cols) <- c("Gene", "Sel", "log2FC", "p-value", "-log10(p)", "Status")
+    
+    cat("After rename, column names:", paste(names(display_cols), collapse = ", "), "\n")
+    cat("First row after rename:\n")
+    print(display_cols[1, ])
+    cat("=== END DEBUG ===\n\n")
+    
+    # Return display data
+    return(list(
+      display = display_cols,
+      original_indices = display_df$original_index,
+      selected_rows = which(sel_col == TRUE)
+    ))
+  }
 
   # Reactive values to store processed data
   values <- reactiveValues(
@@ -1449,6 +1586,9 @@ server <- function(input, output, session) {
     current_dataset = NULL,
     dataset_info = NULL
   )
+
+  results <- reactiveVal(NULL)
+  status <- reactiveVal("No analysis run yet.")
 
   # --- Dataset Selection ---
 
@@ -1595,6 +1735,343 @@ server <- function(input, output, session) {
                 width = "100%")
   })
 
+  # Store fetched versions here
+  versions_list <- reactiveVal(list(Original = "original"))
+
+  # R function to fetch versions from the proxy server (No changes needed here, 
+  # as it handles HTTP errors via stop_for_status, which throws to the catch block)
+  fetch_versions_async <- function(zarr_url) {
+      LIST_URL <- "http://localhost:8080/list_versions"
+      
+      response <- httr::GET(
+          url = LIST_URL,
+          query = list(zarr_url = zarr_url)
+      )
+      
+      # This throws an error if status is 4xx/5xx, immediately jumping to the catch block
+      httr::stop_for_status(response, task = paste("fetch versions for", zarr_url))
+      
+      return(httr::content(response, as = "parsed"))
+  }
+  
+  # R function to robustly convert S3 HTTPS URLs to s3:// format
+  normalize_url <- function(url) {
+      # 1. Check if it's already s3://
+      if (grepl("^s3://", url)) {
+          return(url)
+      }
+      
+      # 2. Handle GCS URLs (often work as is)
+      if (grepl("^https://storage.googleapis.com/", url)) {
+          return(url)
+      }
+      
+      # 3. Handle AWS HTTPS URLs (The main fix for the observed error)
+      if (grepl("\\.amazonaws\\.com/", url)) {
+          # Pattern 1: Virtual hosted style (bucket.s3.region.amazonaws.com)
+          # Capture Group 1: Bucket Name (scrnaseq-browser)
+          # Capture Group 2: The path/key (/strict_epdsc_annotated_data_csc_full.zarr)
+          
+          # We need to extract the part before ".s3." (the bucket) and the path after ".com/"
+          match <- regexec("https?://([^.]+)\\.s3\\.[^/]+\\.amazonaws\\.com/(.*)", url)
+          
+          if (match[[1]][1] != -1) {
+              # Extract the captured groups (requires substring and attr(match[[1]], "match.length"))
+              matches <- regmatches(url, match)
+              
+              if (length(matches[[1]]) >= 3) {
+                  bucket_name <- matches[[1]][2]
+                  object_key <- matches[[1]][3]
+                  return(paste0("s3://", bucket_name, "/", object_key))
+              }
+          }
+          
+          # Fallback for path-style or other complex formats: simply replace the domain base
+          # This is a bit risky, but better than the error you currently have.
+          s3_url <- sub("https?://[^/]*s3[^/]*\\.amazonaws\\.com/", "s3://", url)
+          return(s3_url)
+      }
+
+      # 4. Default return for other types (e.g., local files, which should be filtered elsewhere)
+      return(url) 
+  }
+
+  version_refresh_trigger <- reactiveVal(0)
+
+  observe({
+      req(input$dataset)
+      version_refresh_trigger()
+
+      default_choices <- list(Original = "original")
+      
+      is_zarr <- grepl("\\.zarr$", input$dataset)
+      is_remote <- grepl("^s3://|^https?://", input$dataset) 
+
+      if (!is_zarr || !is_remote) {
+          if (is_zarr) {
+              shiny::showNotification(
+                  "Local Zarr file selected. Versions are only tracked for cloud datasets.", 
+                  duration = 5, 
+                  type = "default"
+              )
+          }
+          versions_list(default_choices)
+          return()
+      }
+      
+      zarr_url <- input$dataset
+      zarr_url_normalized <- normalize_url(zarr_url)
+      
+      print(paste("Fetching versions for Zarr URL:", zarr_url_normalized))
+
+      # FIX: Specify exactly what to export and load
+      future({
+          # Define the function inline to avoid environment capture
+          LIST_URL <- "http://localhost:8080/list_versions"
+          
+          response <- httr::GET(
+              url = LIST_URL,
+              query = list(zarr_url = zarr_url_normalized)
+          )
+          
+          httr::stop_for_status(response, task = paste("fetch versions for", zarr_url_normalized))
+          
+          return(httr::content(response, as = "parsed"))
+          
+      }, globals = list(zarr_url_normalized = zarr_url_normalized),  # Only export the URL
+        packages = c("httr")  # Explicitly specify required packages
+      ) %>%
+      promises::then(function(result) {
+          if (length(result$versions) > 0) {
+              version_choices <- sapply(result$versions, function(v) {
+                  display_name <- paste0(
+                      v$version_prefix, 
+                      " (", v$metadata$analysis_date, 
+                      ") - ", v$metadata$user_id
+                  )
+                  return(display_name)
+              }, USE.NAMES = FALSE)
+              
+              version_values <- sapply(result$versions, function(v) v$version_prefix)
+              choices <- c(default_choices, setNames(version_values, version_choices))
+              versions_list(choices)
+              
+          } else {
+              versions_list(default_choices)
+          }
+      }) %>% 
+      promises::catch(function(error) {
+          error_msg <- sub(".*:\\s*", "", error$message) 
+          
+          shiny::showNotification(
+              paste("Failed to load versions (", error_msg, "). Defaulting to 'Original'."),
+              duration = 8,
+              type = "warning"
+          )
+          
+          versions_list(default_choices)
+      })
+  })
+
+  output$versionUI <- renderUI({
+      req(input$dataset)
+      if (!grepl("\\.zarr$", input$dataset)) {
+          return(NULL)
+      }
+      
+      choices <- versions_list()
+      
+      selectInput(
+          "version_prefix",
+          "Select Version:", 
+          choices = choices,
+          selected = choices[1],
+          width = "100%"
+      )
+  })
+
+  observeEvent(input$version_prefix, {
+    req(values$current_dataset)
+    req(values$lazy_data)
+    req(input$version_prefix)
+
+    print(values$current_dataset)
+
+    # Only proceed if the dataset is a Zarr file and not local
+    if (
+      !grepl("\\.zarr$", values$current_dataset) ||
+      grepl("^(/|\\.|[a-zA-Z]:\\\\)", values$current_dataset)
+    ) {
+      return()
+    }
+
+    version_prefix <- input$version_prefix
+
+    # 🆕 HELPER FUNCTIONS TO LOAD VERSION DATA
+    get_version_object <- function(base_url, version_prefix, array_name) {
+      fsspec <- import("fsspec")
+      zarr <- import("zarr")
+      np <- import("numpy", convert = FALSE)
+
+      full_array_url <- paste0(
+        base_url, "/versions/", 
+        version_prefix, "/masks/", 
+        array_name
+      )
+
+      array_store <- fsspec$get_mapper(full_array_url)
+      z_array_py <- zarr$open_array(store = array_store, mode = "r")
+      r_data <- z_array_py[]
+      r_data_converted <- py_to_r(r_data)
+    }
+
+    get_version_metadata <- function(base_url, version_prefix) {
+      fsspec <- import("fsspec")
+      json_py <- import("json")
+
+      zattrs_url <- paste0(
+        base_url, "/versions/", 
+        version_prefix, "/.zattrs"
+      )
+
+      file_obj <- fsspec$open(zattrs_url, mode = "rt")
+      f <- file_obj$`__enter__`() 
+      metadata_content_py <- f$read()
+      file_obj$`__exit__`(NULL, NULL, NULL)
+
+      metadata_py <- json_py$loads(metadata_content_py)
+      version_metadata_r <- py_to_r(metadata_py)
+    }
+
+    if (version_prefix == "original") {
+      cat("🔄 Restoring ORIGINAL version (full dataset)\n")
+      
+      # 🆕 CLEAR ALL FILTERS
+      filtered_indices(NULL)
+      
+      # 🆕 GET CURRENT ANNOTATION TO RESTORE ALL VISIBLE
+      current_anno <- input$colorBy
+      if (!is.null(current_anno) && current_anno != "loading") {
+        annotation_data <- values$lazy_data$get_obs_column(values$lazy_data$z, current_anno)
+        all_categories <- seq(0, length(unique(annotation_data)) - 1)
+        
+        # ⭐ TRIGGER COLORBY CHANGE TO FORCE REDRAW
+        annotation_numeric <- as.numeric(factor(annotation_data, exclude = NULL))
+        
+        # Get colors
+        ann_colors <- generate_colors(length(unique(annotation_data)))
+        
+        # Convert to binary and encode
+        binary_data <- writeBin(as.numeric(annotation_numeric), raw(), size = 4, endian = "little")
+        annotation_raw <- base64enc::base64encode(binary_data)
+        
+        # Send to JS to redraw
+        session$sendCustomMessage("colorByChange", list(
+          colorBy = current_anno,
+          annotation_raw = annotation_raw,
+          annotation_length = length(annotation_numeric),
+          names = sort(unique(annotation_data)),
+          colors = ann_colors,
+          var_type = "categorical",
+          visibleCategories = all_categories  # ⭐ Include this
+        ))
+      }
+      
+      # Also clear numeric filter UI
+      session$sendCustomMessage("clearAllFilters", list(
+        timestamp = as.numeric(Sys.time()) * 1000
+      ))
+      
+      cat("✅ Full dataset restored with", length(all_categories), "categories\n")
+      return()
+    }
+
+    # 🆕 LOAD VERSION DATA (for non-original versions)
+    cell_mask_version <- get_version_object(
+      base_url = values$current_dataset,
+      version_prefix = version_prefix,
+      array_name = "cell_mask"
+    )
+    
+    visible_categories_version <- get_version_object(
+      base_url = values$current_dataset,
+      version_prefix = version_prefix,
+      array_name = "visible_categories"
+    )
+    
+    selected_points_version <- get_version_object(
+      base_url = values$current_dataset,
+      version_prefix = version_prefix,
+      array_name = "selected_points"
+    )
+    
+    annotation_metadata <- get_version_metadata(
+      base_url = values$current_dataset,
+      version_prefix = version_prefix
+    )
+
+    # 🆕 DETERMINE FILTERING STRATEGY
+    n_selected <- sum(selected_points_version)
+    n_masked <- sum(cell_mask_version)
+    n_total <- length(cell_mask_version)
+    
+    cat("🔄 Loading version:", version_prefix, "\n")
+    cat("   Total cells:", n_total, "\n")
+    cat("   Masked cells:", n_masked, "\n")
+    cat("   Selected points:", n_selected, "\n")
+    
+    filter_to_selection <- FALSE
+    
+    if (n_selected > 0 && n_selected < n_masked) {
+      # User made a lasso selection - show ONLY these cells
+      filter_to_selection <- TRUE
+      cat("   Strategy: FILTER to", n_selected, "selected cells\n")
+      
+      # Update filtered_indices to match selection
+      selected_indices <- which(selected_points_version)
+      filtered_indices(selected_indices)
+      
+    } else if (n_masked < n_total) {
+      # Cells were filtered (category/numeric) but no lasso
+      filter_to_selection <- FALSE
+      cat("   Strategy: HIGHLIGHT", n_masked, "filtered cells\n")
+      
+      # Update filtered_indices to match mask
+      masked_indices <- which(cell_mask_version)
+      filtered_indices(masked_indices)
+    } else {
+      # No filtering
+      cat("   Strategy: Show ALL cells\n")
+      filtered_indices(NULL)
+    }
+    
+    # 🆕 RESTORE NUMERIC FILTERS if they exist
+    if (!is.null(annotation_metadata$numeric_filters) && 
+        length(annotation_metadata$numeric_filters) > 0) {
+      cat("   Restoring", length(annotation_metadata$numeric_filters), "numeric filters\n")
+      
+      # Send to JS to rebuild filter UI
+      session$sendCustomMessage("restoreNumericFilters", list(
+        filters = annotation_metadata$numeric_filters
+      ))
+    } else {
+      # Clear numeric filters if version has none
+      session$sendCustomMessage("clearAllFilters", list(
+        timestamp = as.numeric(Sys.time()) * 1000
+      ))
+    }
+
+    # 🆕 SEND RESTORE MESSAGE WITH FILTERING STRATEGY
+    session$sendCustomMessage("restoreState", list(
+      visibleCategories = visible_categories_version,
+      selectedPoints = if (filter_to_selection) selected_points_version else NULL,
+      annotationName = annotation_metadata$umap_colorby,
+      filterToSelection = filter_to_selection,
+      cellMask = cell_mask_version,
+      isOriginal = FALSE
+    ))
+  })
+
   # --- Lazy Data Loading ---
 
   # Process data when lazy_data is available
@@ -1603,7 +2080,7 @@ server <- function(input, output, session) {
     
     tryCatch({
       session$sendCustomMessage("showSpinner", TRUE)
-      output$status <- renderText("Processing metadata...")
+      # output$status <- renderText("Processing metadata...")
       
       t_start <- Sys.time()
       cat("⏱ Starting lazy_data processing at", format(t_start), "\n")
@@ -1698,8 +2175,8 @@ server <- function(input, output, session) {
       
       session$sendCustomMessage("showSpinner", FALSE)
 
-      output$status <- renderText(paste0("Rendered ", nrow(raw_data), " cells with ", 
-                                        length(annotation_names), " annotations."))
+      # output$status <- renderText(paste0("Rendered ", nrow(raw_data), " cells with ", 
+      #                                   length(annotation_names), " annotations."))
       
       t_end <- Sys.time()
       cat("⏱ Total observer time:", round(difftime(t_end, t_start, units = "secs"), 3), "seconds\n")
@@ -1964,6 +2441,21 @@ server <- function(input, output, session) {
     values$last_dataset_change(as.numeric(Sys.time()) * 1000)
   })
 
+  observeEvent(input$dataset, {
+    req(input$dataset)
+    
+    cat("\n🔄 DATASET CHANGED - Clearing all filters\n")
+    
+    # ⭐ Reset numeric filters
+    filtered_indices(NULL)
+    
+    # Reset visible categories timestamp
+    values$last_dataset_change(as.numeric(Sys.time()) * 1000)
+    
+    # Send clear message to JavaScript
+    session$sendCustomMessage("clearAllFilters", list(timestamp = Sys.time()))
+  })
+
   visible_categories <- reactive({
     vis_cats <- input$visibleCategories
     
@@ -1984,65 +2476,206 @@ server <- function(input, output, session) {
   subset_indices_reactive <- reactive({
     req(input$dataset, values$lazy_data)
     
+    n_total <- nrow(values$lazy_data$df)
+    
+    cat("\n🔄 RECALCULATING SUBSET PIPELINE\n")
+    cat("═════════════════════════════════════════════════════════\n")
+    
+    # ========================================================================
+    # STAGE 0: MASTER DATASET
+    # ========================================================================
+    
+    cat("Stage 0 - MASTER: ", format(n_total, big.mark=","), " cells\n")
+    current_indices <- seq_len(n_total)
+    
+    # ========================================================================
+    # STAGE 1: CATEGORY FILTERING
+    # ========================================================================
+    
+    cat("Stage 1 - CATEGORY: ")
+    
     vis_cats <- visible_categories()
-    sel_points <- selected_points()
-
-    # Handle case with no visible categories (no category subsetting)
-    if (is.null(vis_cats)) {
-      selected_indices <- if (is.null(sel_points)) integer(0) else as.numeric(unlist(sel_points$selectedIndices)) + 1
-      
-      if (length(selected_indices) == 0) {
-        # All points when no selection
-        n_points <- nrow(values$lazy_data$df)
-        combined_subset_indices <- seq_len(n_points)
-      } else {
-        combined_subset_indices <- selected_indices
-      }
-      
-      list(
-        selected_visible = integer(0),
-        all_visible = seq_len(n_points),
-        combined = combined_subset_indices
-      )
-    } else {
-      # Extract visible category indices and names
+    if (!is.null(vis_cats) && !is.null(vis_cats$annotationName)) {
       annotation_name <- vis_cats$annotationName
       visible_indices <- unlist(vis_cats$visibleIndices)
-
+      
+      # Get annotation data for ALL cells
       point_data <- values$lazy_data$get_obs_column(values$lazy_data$z, annotation_name)
       category_names <- sort(unique(point_data))
-
-      visible_category_names <- category_names[visible_indices + 1]  # Adjust for 0-based indexing
-
-      # Extract selected point indices
-      selected_indices <- if (is.null(sel_points)) integer(0) else as.numeric(unlist(sel_points$selectedIndices)) + 1
+      visible_category_names <- category_names[visible_indices + 1]
       
-      # Compute selected visible indices
-      selected_visible_indices <- integer(0)
-      if (length(selected_indices) > 0) {
-        selected_categories <- point_data[selected_indices]
-        visible_mask <- selected_categories %in% visible_category_names
-        selected_visible_indices <- selected_indices[visible_mask]
-      }
-
-      # All visible indices
-      all_visible_mask <- point_data %in% visible_category_names
-      all_visible_indices <- which(all_visible_mask)
+      # Filter to cells in visible categories
+      cat_mask <- point_data %in% visible_category_names
+      cat_mask[is.na(cat_mask)] <- FALSE
       
-      # Combined: all visible if no selection, otherwise selected visible
-      if (length(selected_indices) > 0) {
-        combined_subset_indices <- selected_visible_indices
-      } else {
-        combined_subset_indices <- all_visible_indices
-      }
-
-      list(
-        selected_visible = selected_visible_indices,
-        all_visible = all_visible_indices,
-        combined = combined_subset_indices
-      )
+      current_indices <- which(cat_mask)
+      cat("Active - ", format(length(current_indices), big.mark=","), " cells\n")
+    } else {
+      cat("Inactive - ", format(length(current_indices), big.mark=","), " cells\n")
     }
+    
+    # ========================================================================
+    # STAGE 2: NUMERIC FILTERING
+    # ========================================================================
+    
+    cat("Stage 2 - NUMERIC: ")
+    
+    filtered <- filtered_indices()
+    if (!is.null(filtered) && length(filtered) > 0) {
+      # Keep only cells that pass numeric filters AND are in current_indices
+      current_indices <- intersect(current_indices, filtered)
+      cat("Active - ", format(length(current_indices), big.mark=","), " cells\n")
+    } else {
+      cat("Inactive - ", format(length(current_indices), big.mark=","), " cells\n")
+    }
+    
+    # ========================================================================
+    # STAGE 3: LASSO SELECTION (FINAL)
+    # ========================================================================
+    
+    cat("Stage 3 - LASSO: ")
+    
+    sel_points <- selected_points()
+    if (!is.null(sel_points) && !is.null(sel_points$selectedIndices) && 
+        length(sel_points$selectedIndices) > 0) {
+      selected_indices <- as.numeric(unlist(sel_points$selectedIndices)) + 1
+      
+      # Keep only cells that are selected AND passed all previous filters
+      current_indices <- intersect(current_indices, selected_indices)
+      cat("Active - ", format(length(current_indices), big.mark=","), " cells (FINAL)\n")
+    } else {
+      cat("Inactive - ", format(length(current_indices), big.mark=","), " cells (FINAL)\n")
+    }
+    
+    cat("═════════════════════════════════════════════════════════\n")
+    cat("✅ FINAL SUBSET:", format(length(current_indices), big.mark=","), "cells\n\n")
+    
+    list(
+      combined = current_indices  # Use this for all visualizations
+    )
   })
+
+
+  filtered_indices <- reactiveVal(NULL)
+
+  observeEvent(input$applyFilters, {
+    req(values$lazy_data)
+    
+    raw_filters <- input$applyFilters
+    
+    cat("\n🔍 ========== FILTER RECEIVER ==========\n")
+    cat("Raw class:", class(raw_filters), "\n")
+    
+    # Handle empty array (Clear button sends empty JSON [])
+    if (is.null(raw_filters) || raw_filters == "" || raw_filters == "[]") {
+      cat("✅ CLEAR BUTTON PRESSED - Resetting all numeric filters\n")
+      cat("🔍 ==========================================\n\n")
+      
+      # ⭐ CRITICAL: Set to NULL to clear all numeric filtering
+      filtered_indices(NULL)
+      
+      # Also update the plots immediately
+      session$sendCustomMessage("updateFilteredIndices", list(
+        filteredIndices = NULL,
+        count = nrow(values$lazy_data$df),
+        active = FALSE
+      ))
+      
+      return()
+    }
+    
+    # ⭐ PARSE JSON
+    filters <- tryCatch({
+      parsed <- jsonlite::fromJSON(raw_filters, simplifyDataFrame = FALSE)
+      cat("✅ Parsed", length(parsed), "filter(s)\n")
+      parsed
+    }, error = function(e) {
+      cat("❌ JSON parse error:", e$message, "\n")
+      list()
+    })
+    
+    if (length(filters) == 0) {
+      cat("❌ No valid filters\n")
+      cat("🔍 ==========================================\n\n")
+      filtered_indices(NULL)
+      return()
+    }
+    
+    # Get current subset (from previous filters)
+    current_subset <- seq_len(nrow(values$lazy_data$df))
+    n_total <- nrow(values$lazy_data$df)
+    
+    # Start with all cells
+    passing_mask <- rep(FALSE, n_total)
+    passing_mask[current_subset] <- TRUE
+    
+    cat("📊 Starting with", sum(passing_mask), "cells\n\n")
+    
+    # Apply each filter with detailed logging
+    for (i in seq_along(filters)) {
+      f <- filters[[i]]
+      
+      cat("━━ Filter", i, "━━\n")
+      
+      # Extract parameters
+      if (is.list(f)) {
+        col_name <- f$col
+        min_thresh <- as.numeric(f$minThresh)
+        max_thresh <- as.numeric(f$maxThresh)
+      } else {
+        col_name <- f["col"]
+        min_thresh <- as.numeric(f["minThresh"])
+        max_thresh <- as.numeric(f["maxThresh"])
+      }
+      
+      col_name <- as.character(col_name)
+      
+      cat("  Column: '", col_name, "'\n", sep="")
+      cat("  Range: [", min_thresh, ", ", max_thresh, "]\n", sep="")
+      
+      # Validate
+      if (is.null(col_name) || is.na(col_name) || col_name == "" || 
+          is.na(min_thresh) || is.na(max_thresh)) {
+        cat("  ❌ Invalid - skipping\n\n")
+        next
+      }
+      
+      # GET FULL COLUMN DATA
+      col_data <- tryCatch({
+        values$lazy_data$get_obs_column(values$lazy_data$z, col_name)
+      }, error = function(e) {
+        cat("  ❌ Error:", e$message, "\n")
+        NULL
+      })
+      
+      if (is.null(col_data) || length(col_data) != n_total) {
+        cat("  ⚠️ Column invalid - skipping\n\n")
+        next
+      }
+      
+      # Apply threshold
+      col_numeric <- as.numeric(col_data)
+      filter_mask <- (col_numeric >= min_thresh) & (col_numeric <= max_thresh)
+      filter_mask[is.na(filter_mask)] <- FALSE
+      
+      # Apply AND logic
+      passing_mask <- passing_mask & filter_mask
+      
+      remaining <- sum(passing_mask)
+      cat("  ✅ After filter:", remaining, "cells\n\n")
+    }
+    
+    # Extract final indices and store
+    passing_indices <- which(passing_mask)
+    
+    # ⭐ CRITICAL: Update filtered_indices() reactive
+    filtered_indices(passing_indices)
+    
+    cat("═════════════════════════════════════════════\n")
+    cat("✅ RESULT:", length(passing_indices), "cells pass all", length(filters), "filters\n")
+    cat("🔍 ==========================================\n\n")
+  })
+
 
   # Optionally store the combined in reactiveValues for broader access
   observe({
@@ -2051,107 +2684,171 @@ server <- function(input, output, session) {
 
   output$selectedInfo <- renderUI({
     subset_info <- subset_indices_reactive()
-    
     vis_cats <- visible_categories()
     sel_points <- selected_points()
-
-    print(vis_cats)
-    # print(sel_points)
-
-    # Default output if no selection at all
-    if (is.null(sel_points) || length(unlist(sel_points$selectedIndices)) == 0) {
-      if (is.null(vis_cats)) {
-        return(HTML("No points selected or no categories visible."))
-      } else {
-        # Show basic info if categories visible but no selection
-        point_data <- values$lazy_data$get_obs_column(values$lazy_data$z, vis_cats$annotationName)
-        category_names <- sort(unique(point_data))
-        visible_indices <- unlist(vis_cats$visibleIndices)
-        visible_category_names <- category_names[visible_indices + 1]  # Adjust for 0-based indexing
-        
-        return(HTML(
-          paste(
-            "<table border='1' style='border-collapse: collapse; width: 100%;'>",
-            "<tr><th>Information</th><th>Value</th></tr>",
-            "<tr><td><b>Visible Categories</b></td><td>", paste(visible_category_names, collapse = ", "), "</td></tr>",
-            "<tr><td><b>Selected Points</b></td><td>None</td></tr>",
-            "<tr><td><b>Number of Selected Visible Indices</b></td><td>", length(subset_info$selected_visible), "</td></tr>",
-            "<tr><td><b>Number of All Visible Indices</b></td><td>", length(subset_info$all_visible), "</td></tr>",
-            "<tr><td><b>Number of Combined Subset Indices (Global)</b></td><td>", length(subset_info$combined), "</td></tr>",
-            "</table>"
-          )
-        ))
-      }
-    }
-
-    # At this point, there is a lasso selection (sel_points not null and has indices)
-    selected_indices <- as.numeric(unlist(sel_points$selectedIndices)) + 1
+    filtered <- filtered_indices()
     
-    # Handle case with no visible categories (no category subsetting)
-    if (is.null(vis_cats)) {
-      return(HTML(
-        paste(
-          "<table border='1' style='border-collapse: collapse; width: 100%;'>",
-          "<tr><th>Information</th><th>Value</th></tr>",
-          "<tr><td><b>Visible Categories</b></td><td>None (no category subsetting selected)</td></tr>",
-          "<tr><td><b>Selected Points</b></td><td>", length(selected_indices), "</td></tr>",
-          "<tr><td><b>Number of Selected Visible Indices</b></td><td>", length(subset_info$selected_visible), "</td></tr>",
-          "<tr><td><b>Number of All Visible Indices</b></td><td>", length(subset_info$all_visible), "</td></tr>",
-          "<tr><td><b>Number of Combined Subset Indices (Global)</b></td><td>", length(subset_info$combined), "</td></tr>",
-          "</table>"
-        )
-      ))
+    n_master <- nrow(values$lazy_data$df)
+    
+    # ========================================================================
+    # CALCULATE COUNTS IN PIPELINE ORDER
+    # ========================================================================
+    
+    # Stage 0: Master dataset
+    n_stage_0 <- n_master
+    
+    # Stage 1: After category filter
+    n_stage_1 <- n_master
+    cat_active <- FALSE
+    cat_details <- ""
+    
+    if (!is.null(vis_cats) && !is.null(vis_cats$annotationName)) {
+      annotation_name <- vis_cats$annotationName
+      visible_indices <- unlist(vis_cats$visibleIndices)
+      
+      point_data <- values$lazy_data$get_obs_column(values$lazy_data$z, annotation_name)
+      category_names <- sort(unique(point_data))
+      visible_category_names <- category_names[visible_indices + 1]
+      
+      cat_mask <- point_data %in% visible_category_names
+      n_stage_1 <- sum(cat_mask, na.rm = TRUE)
+      cat_active <- TRUE
+      
+      # Build category detail string
+      cat_counts <- table(point_data[cat_mask])
+      cat_details_lines <- sapply(names(cat_counts), function(cat) {
+        sprintf("  %s: %s", cat, format(as.numeric(cat_counts[cat]), big.mark = ","))
+      })
+      cat_details <- paste(cat_details_lines, collapse = "\n")
     }
-
-    # Now handle case with both lasso selection and visible categories
-    point_data <- values$lazy_data$get_obs_column(values$lazy_data$z, vis_cats$annotationName)
-    category_names <- sort(unique(point_data))
-    print(category_names)
-
-    visible_indices <- unlist(vis_cats$visibleIndices)
-    visible_category_names <- category_names[visible_indices + 1]  # Adjust for 0-based indexing
-
-    # Map selected indices to categories
-    selected_categories <- point_data[selected_indices]
-
-    # Filter for visible categories
-    selected_visible_categories <- selected_categories[selected_categories %in% visible_category_names]
-
-    # Summarize counts per category
-    category_counts <- table(selected_visible_categories)
-
-    # Generate summary table
-    summary_table <- paste(
-      "<table border='1' style='border-collapse: collapse; width: 100%;'>",
-      "<tr><th>Information</th><th>Value</th></tr>",
-      "<tr><td><b>Visible Categories</b></td><td>", paste(visible_category_names, collapse = ", "), "</td></tr>",
-      "<tr><td><b>Selected Points</b></td><td>", length(selected_indices), "</td></tr>",
-      "<tr><td><b>Number of Selected Visible Indices</b></td><td>", length(subset_info$selected_visible), "</td></tr>",
-      "<tr><td><b>Number of All Visible Indices</b></td><td>", length(subset_info$all_visible), "</td></tr>",
-      "<tr><td><b>Number of Combined Subset Indices (Global)</b></td><td>", length(subset_info$combined), "</td></tr>",
-      "</table>"
+    
+    # Stage 2: After numeric filters
+    n_stage_2 <- n_stage_1
+    numeric_active <- FALSE
+    
+    if (!is.null(filtered) && length(filtered) > 0) {
+      n_stage_2 <- length(filtered)
+      numeric_active <- TRUE
+    }
+    
+    # Stage 3: After lasso selection (FINAL)
+    n_stage_3 <- n_stage_2
+    lasso_active <- FALSE
+    
+    if (!is.null(sel_points) && !is.null(sel_points$selectedIndices) && 
+        length(sel_points$selectedIndices) > 0) {
+      n_stage_3 <- length(unlist(sel_points$selectedIndices))
+      lasso_active <- TRUE
+    }
+    
+    # ========================================================================
+    # BUILD DISPLAY IN CORRECT ORDER
+    # ========================================================================
+    
+    HTML(
+      paste(
+        # Main container
+        "<div style='background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); padding: 20px; border-radius: 10px; margin-bottom: 20px;'>",
+        
+        # Title
+        "<div style='font-size: 16px; font-weight: bold; color: #2c3e50; margin-bottom: 15px;'>",
+        "📊 CELL SCREENING PIPELINE",
+        "</div>",
+        
+        # Stage 0: Master dataset
+        "<div style='background: white; padding: 12px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid #3498db;'>",
+        "<div style='font-size: 12px; color: #7f8c8d;'>🎯 MASTER DATASET</div>",
+        "<div style='font-size: 24px; font-weight: bold; color: #2c3e50;'>",
+        format(n_stage_0, big.mark = ","),
+        " <span style='font-size: 14px; color: #7f8c8d;'>cells</span></div>",
+        "</div>",
+        
+        # Stage 1: Category filter
+        "<div style='background: ", if(cat_active) "#e8f5e9" else "#f5f5f5", "; padding: 12px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid ", if(cat_active) "#4caf50" else "#ccc", ";'>",
+        "<div style='font-size: 12px; color: #7f8c8d; margin-bottom: 4px;'>",
+        if(cat_active) "1️⃣ CATEGORIES (ACTIVE)" else "1️⃣ Categories",
+        "</div>",
+        "<div style='font-size: 20px; font-weight: bold; color: #2c3e50;'>",
+        format(n_stage_1, big.mark = ","),
+        " <span style='font-size: 14px; color: #7f8c8d;'>cells</span>",
+        " <span style='font-size: 12px; color: ", if(cat_active) "#4caf50" else "#999", ";'>",
+        if(cat_active) paste0("(", round(n_stage_1/n_stage_0*100, 1), "%)") else "—",
+        "</span>",
+        "</div>",
+        if(nzchar(cat_details)) {
+          paste0(
+            "<div style='font-size: 11px; color: #666; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.1);'>",
+            gsub("\n", "<br/>", cat_details),
+            "</div>"
+          )
+        } else {
+          ""
+        },
+        "</div>",
+        
+        # Stage 2: Numeric filters
+        "<div style='background: ", if(numeric_active) "#e3f2fd" else "#f5f5f5", "; padding: 12px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid ", if(numeric_active) "#2196f3" else "#ccc", ";'>",
+        "<div style='font-size: 12px; color: #7f8c8d; margin-bottom: 4px;'>",
+        if(numeric_active) "2️⃣ NUMERIC FILTERS (ACTIVE)" else "2️⃣ Numeric Filters",
+        "</div>",
+        "<div style='font-size: 20px; font-weight: bold; color: #2c3e50;'>",
+        format(n_stage_2, big.mark = ","),
+        " <span style='font-size: 14px; color: #7f8c8d;'>cells</span>",
+        " <span style='font-size: 12px; color: ", if(numeric_active) "#2196f3" else "#999", ";'>",
+        if(numeric_active) paste0("(", round(n_stage_2/n_stage_1*100, 1), "%)") else "—",
+        "</span>",
+        "</div>",
+        "</div>",
+        
+        # Stage 3: Lasso selection (FINAL)
+        "<div style='background: ", if(lasso_active) "#fff3e0" else "#f5f5f5", "; padding: 12px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid ", if(lasso_active) "#ff9800" else "#ccc", ";'>",
+        "<div style='font-size: 12px; color: #7f8c8d; margin-bottom: 4px;'>",
+        if(lasso_active) "3️⃣ LASSO SELECTION (ACTIVE - FINAL)" else "3️⃣ Lasso Selection",
+        "</div>",
+        "<div style='font-size: 20px; font-weight: bold; color: #2c3e50;'>",
+        format(n_stage_3, big.mark = ","),
+        " <span style='font-size: 14px; color: #7f8c8d;'>cells</span>",
+        " <span style='font-size: 12px; color: ", if(lasso_active) "#ff9800" else "#999", ";'>",
+        if(lasso_active) paste0("(", round(n_stage_3/n_stage_2*100, 1), "%)") else "—",
+        "</span>",
+        "</div>",
+        "</div>",
+        
+        # Final summary bar
+        "<div style='background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); padding: 15px; border-radius: 6px; color: white; text-align: center;'>",
+        "<div style='font-size: 12px; opacity: 0.9; margin-bottom: 5px;'>FINAL RESULT FOR VISUALIZATION</div>",
+        "<div style='font-size: 28px; font-weight: bold;'>",
+        format(n_stage_3, big.mark = ","),
+        " <span style='font-size: 16px; opacity: 0.9;'>/ ", format(n_stage_0, big.mark = ","), "</span>",
+        "</div>",
+        "<div style='font-size: 12px; opacity: 0.9; margin-top: 5px;'>",
+        round(n_stage_3/n_stage_0*100, 1), "% of dataset",
+        "</div>",
+        "</div>",
+        
+        "</div>"
+      )
     )
-
-    # Generate counts table if there are selected visible categories
-    if (length(selected_visible_categories) > 0) {
-      counts_rows <- paste(
-        sapply(names(category_counts), function(cat) {
-          paste0("<tr><td>", cat, "</td><td>", category_counts[cat], "</td></tr>")
-        }),
-        collapse = ""
-      )
-      counts_table <- paste(
-        "<br><table border='1' style='border-collapse: collapse; width: 100%;'>",
-        "<tr><th>Selected Category</th><th>Count</th></tr>",
-        counts_rows,
-        "</table>"
-      )
-    } else {
-      counts_table <- "<br><p>No selected points in visible categories.</p>"
-    }
-
-    HTML(paste(summary_table, counts_table))
   })
+
+  observe({
+    subset_indices_reactive()  # Trigger the reactive
+    cat("🔄 Visible categories updated - recalculating subset\n")
+  })
+
+  # When lasso selection changes, plots update
+  observe({
+    subset_indices_reactive()  # Trigger the reactive
+    cat("🔄 Lasso selection updated - recalculating subset\n")
+  })
+
+  # When numeric filters change, plots update
+  observe({
+    filtered_indices()  # Dependency
+    subset_indices_reactive()  # Trigger the reactive
+    cat("🔄 Numeric filters updated - recalculating subset\n")
+  })
+
 
   # Selected points output
   output$selected_points <- renderPrint({
@@ -2164,6 +2861,37 @@ server <- function(input, output, session) {
         if (length(input$selectedPoints$selectedIndices) > 15) " ..."
       )
     }
+  })
+
+  observeEvent(filtered_indices(), {
+    filtered <- filtered_indices()
+    
+    if (is.null(filtered)) {
+      cat("📤 NO NUMERIC FILTERS - showing all cells\n")
+      session$sendCustomMessage("updateFilteredIndices", list(
+        filteredIndices = NULL,
+        count = nrow(values$lazy_data$df),
+        active = FALSE
+      ))
+    } else {
+      cat("📤 NUMERIC FILTERS ACTIVE -", length(filtered), "cells pass\n")
+      session$sendCustomMessage("updateFilteredIndices", list(
+        filteredIndices = as.integer(filtered - 1),  # 0-based for JS
+        count = length(filtered),
+        active = TRUE
+      ))
+    }
+  }, priority = 100)  # High priority to update plots immediately
+
+  observeEvent(input$clearAllFilters, {
+    cat("🔄 Clearing all filters\n")
+    filtered_indices(NULL)
+    
+    session$sendCustomMessage("updateFilteredIndices", list(
+      filteredIndices = NULL,
+      count = nrow(values$lazy_data$df),
+      active = FALSE
+    ))
   })
 
   # ---- Precompute column statistics once ----
@@ -2492,7 +3220,7 @@ server <- function(input, output, session) {
       )
     )
   })
-
+  
   # --- Button-controlled pathway scoring and UMAP rendering ---
 
   # Disable button while computing (optional but recommended)
@@ -2629,46 +3357,150 @@ server <- function(input, output, session) {
       } else {
         extra_scores <- matrix(0, nrow = n_cells_umap - n_cells_scores, ncol = ncol(pathway_scores()))
         padded_scores <- rbind(pathway_scores(), extra_scores)
-        # not reactiveVal anymore, so no reassign
       }
     }
 
-    first_pathway <- colnames(pathway_scores())[1]
-    req(!is.null(first_pathway))
-
+    # Combine UMAP coords with all pathway scores
     plot_data <- cbind(umap_coords, as.data.frame(pathway_scores()))
-    list(data = plot_data, colorBy = first_pathway)
+    
+    # Get list of pathways (up to 4 max)
+    pathways <- colnames(pathway_scores())
+    pathways_to_plot <- head(pathways, 4)
+    
+    list(data = plot_data, pathways = pathways_to_plot)
   })
 
 
-  # 3️⃣ Rendering — triggered only after eventReactive runs
-  output$umapPlot <- renderMy_scatterplot({
+  # 3️⃣ Track sync state for multi-plot
+  multi_sync_enabled <- reactiveVal(FALSE)
+  
+  observeEvent(input$toggle_multi_sync, {
     req(umap_data())
-    
     ud <- umap_data()
-    req(ud$colorBy %in% names(ud$data))
+    
+    multi_sync_enabled(!multi_sync_enabled())
+    
+    # Generate plot IDs based on current pathways
+    plot_ids <- paste0("umapPlot_", seq_along(ud$pathways))
+    
+    cat("🔗 Sync toggled:", multi_sync_enabled(), "| Plot IDs:", paste(plot_ids, collapse=", "), "\n")
+    
+    session$sendCustomMessage("my_scatterplot_sync", list(
+      enabled = multi_sync_enabled(),
+      plotIds = plot_ids
+    ))
+  })
 
-    print(paste("Rendering UMAP with colorBy:", ud$colorBy, "and", nrow(ud$data), "cells"))
 
-    my_scatterplot(
-      data = ud$data,
-      x = "x",
-      y = "y",
-      colorBy = ud$colorBy,
-      size = log(length(ud$colorBy)) + 6,
-      continuous_palette = "inferno",
-      xlab = "UMAP 1",
-      ylab = "UMAP 2",
-      showAxes = FALSE,
-      showTooltip = TRUE,
-      opacity = 0.8,
-      backgroundColor = "white",
-      legend_title = ud$colorBy,
-      enableDownload = TRUE,
+  # 4️⃣ Render UI container for multi-plots
+  output$umapPlotContainer <- renderUI({
+    req(umap_data())
+    ud <- umap_data()
+    n_pathways <- length(ud$pathways)
+    
+    if (n_pathways == 0) {
+      return(div("No pathways to display", style = "color: #999; padding: 20px;"))
+    }
+    
+    # Create grid layout
+    grid_style <- if (n_pathways == 1) "grid-template-columns: 1fr;" else
+                  if (n_pathways == 2) "grid-template-columns: 1fr 1fr;" else
+                  "grid-template-columns: 1fr 1fr;"
+    
+    plot_outputs <- lapply(seq_along(ud$pathways), function(i) {
+      pathway <- ud$pathways[i]
+      plot_id <- paste0("umapPlot_", i)
+      
+      div(
+        class = "plot-container",
+        style = "border: 1px solid #ddd; border-radius: 4px; overflow: hidden; background: white;",
+        my_scatterplotOutput(
+          outputId = plot_id,
+          width = "100%",
+          height = "400px"
+        )
+      )
+    })
+    
+    # Add sync button if multiple plots
+    sync_button_ui <- NULL
+    if (n_pathways > 1) {
+      sync_button_ui <- actionButton(
+        "toggle_multi_sync",
+        if (multi_sync_enabled()) "🔗 Disable Sync" else "Enable Sync",
+        style = paste(
+          "margin-bottom: 10px;",
+          "padding: 10px 20px;",
+          "background:", if (multi_sync_enabled()) "#28a745" else "#6c757d", ";",
+          "color: white;",
+          "border: none;",
+          "border-radius: 4px;",
+          "cursor: pointer;",
+          "font-weight: bold;"
+        )
+      )
+    }
+    
+    div(
+      sync_button_ui,
+      div(
+        style = paste("display: grid; gap: 15px;", grid_style),
+        plot_outputs
+      )
     )
   })
 
 
+  # 5️⃣ Render individual pathway plots (up to 4)
+  observe({
+    req(umap_data())
+    ud <- umap_data()
+    
+    cat("🔄 Rendering", length(ud$pathways), "plots\n")
+    
+    # Render up to 4 individual plots
+    for (i in 1:min(4, length(ud$pathways))) {
+      local({
+        idx <- i
+        pathway <- ud$pathways[idx]
+        plot_id <- paste0("umapPlot_", idx)
+        
+        cat("Rendering plot", idx, "with pathway:", pathway, "\n")
+        
+        output[[plot_id]] <- renderMy_scatterplot({
+          req(umap_data())
+          ud_inner <- umap_data()
+          
+          plot_data <- data.frame(
+            x = ud_inner$data$x,
+            y = ud_inner$data$y,
+            expression = ud_inner$data[[pathway]]
+          )
+          
+          size_calc <- log(nrow(plot_data)) + 3
+          
+          my_scatterplot(
+            data = plot_data,
+            x = "x",
+            y = "y",
+            colorBy = "expression",
+            size = size_calc,
+            continuous_palette = "inferno",
+            xlab = "UMAP 1",
+            ylab = "UMAP 2",
+            showAxes = FALSE,
+            showTooltip = TRUE,
+            opacity = 0.8,
+            backgroundColor = "white",
+            legend_title = pathway,
+            enableDownload = TRUE,
+            plotId = plot_id,
+            syncPlots = paste0("umapPlot_", seq_along(ud_inner$pathways))
+          )
+        })
+      })
+    }
+  })
 
   # UI select for GMT gene sets (Panel 2) - with "All" option
   output$heatmap_gmt_select_panel2 <- renderUI({
@@ -3992,7 +4824,1603 @@ server <- function(input, output, session) {
     canvases = list()  # Keep for fallback if needed
   )
 
+  output$save_changes_ui <- renderUI({
+    req(values$lazy_data)
+    actionButton("save_changes", "Save Version", class = "btn btn-secondary btn-sm")
+  })
+
+  # Define the R client function for the new endpoint
+  check_version_async <- function(zarr_url, version_prefix) {
+      VERIFY_URL <- "http://localhost:8080/check_version_status"
+      
+      response <- httr::GET(
+          url = VERIFY_URL,
+          query = list(
+              zarr_url = zarr_url,
+              version_prefix = version_prefix
+          )
+      )
+      
+      httr::stop_for_status(response, task = "check version status")
+      
+      return(httr::content(response, as = "parsed"))
+  }
+
+  observeEvent(input$save_changes, {
+    req(values$lazy_data)
+
+    # ---- open the modal -------------------------------------------------
+    showModal(show_prefix_modal())
+  })
+
+  # ---- when the user clicks OK in the modal -----------------------------
+  observeEvent(input$prefix_ok, {
+    # Grab what the user typed (trim whitespace)
+    user_prefix <- trimws(input$version_prefix_input %||% "")
+
+    # If empty → default to today's date
+    version_prefix <- if (nzchar(user_prefix)) user_prefix else format(Sys.Date(), "%Y-%m-%d")
+
+    # Close the modal
+    removeModal()
+
+    N_TOTAL_CELLS <- nrow(values$lazy_data$df)
+
+    # 🆕 GET CURRENT FILTERED STATE (includes numeric filters)
+    subset_info <- subset_indices_reactive()
+    subset_indices <- subset_info$combined  # These are the cells passing ALL filters
+    
+    # Create full cell mask
+    full_cell_mask <- rep(FALSE, N_TOTAL_CELLS)
+    if (length(subset_indices) > 0) full_cell_mask[subset_indices] <- TRUE
+
+    vis_cat <- unlist(visible_categories()$visibleIndices %||% integer(0))
+    sel_points <- unlist(selected_points()$selectedIndices %||% integer(0))
+    
+    # 🆕 CAPTURE NUMERIC FILTERS STATE
+    numeric_filters_state <- input$applyFilters  # This is the JSON string from JS
+    
+    user_id <- Sys.getenv("SHINYPROXY_USERNAME")
+    user_id <- trimws(user_id)
+    if (is.na(user_id) || user_id == "") {
+      user_id <- "jack"
+    }
+
+    print(paste("Using user_id:", user_id))
+    version_prefix <- paste0(user_id, "_", version_prefix)
+
+    # ⭐ NEW PIPELINE METADATA
+    # Calculate which cells pass each stage
+    n_total <- nrow(values$lazy_data$df)
+
+    # Stage 1: Category filter
+    category_mask <- rep(TRUE, n_total)
+    if (!is.null(vis_cat) && length(vis_cat) > 0 && !is.null(input$colorBy)) {
+      annotation_data <- values$lazy_data$get_obs_column(values$lazy_data$z, input$colorBy)
+      category_names <- sort(unique(annotation_data))
+      visible_category_names <- category_names[vis_cat + 1]
+      category_mask <- annotation_data %in% visible_category_names
+    }
+    n_after_category <- sum(category_mask)
+
+    # Stage 2: Numeric filter
+    numeric_mask <- rep(TRUE, n_total)
+    if (!is.null(filtered_indices()) && length(filtered_indices()) > 0) {
+      numeric_mask <- rep(FALSE, n_total)
+      numeric_mask[filtered_indices()] <- TRUE
+    }
+    n_after_numeric <- sum(category_mask & numeric_mask)
+
+    # Stage 3: Lasso selection (final)
+    has_lasso <- !is.null(sel_points) && length(sel_points) > 0
+
+    current_payload_data <- list(
+      zarr_url = normalize_url(input$dataset),
+      user_id  = user_id,
+      version_prefix = version_prefix,
+      metadata = list(
+        filter_criterion = "Multi-stage filtering pipeline",
+        n_total_cells = n_total,
+        n_after_category = n_after_category,
+        n_after_numeric = n_after_numeric,
+        n_filtered_cells = length(subset_indices),
+        has_lasso_selection = has_lasso,
+        analysis_date = format(Sys.Date(), "%Y-%m-%d"),
+        umap_colorby = input$colorBy,
+        
+        # ⭐ PIPELINE STAGE INFO
+        filter_pipeline = list(
+          stage1_category = list(
+            active = length(vis_cat) < length(unique(annotation_data)),
+            annotation = input$colorBy,
+            visible_indices = vis_cat
+          ),
+          stage2_numeric = list(
+            active = !is.null(numeric_filters_state) && 
+                    numeric_filters_state != "" && 
+                    numeric_filters_state != "[]",
+            filters = if (!is.null(numeric_filters_state) && 
+                        numeric_filters_state != "" && 
+                        numeric_filters_state != "[]") {
+              jsonlite::fromJSON(numeric_filters_state)
+            } else {
+              list()
+            }
+          ),
+          stage3_lasso = list(
+            active = has_lasso,
+            n_selected = length(sel_points)
+          )
+        )
+      ),
+      zarr_arrays = list(
+        cell_mask = I(full_cell_mask),
+        visible_categories = I(vis_cat),
+        selected_points = I(sel_points),
+        category_mask = I(category_mask),  # ⭐ NEW
+        numeric_mask = I(numeric_mask)     # ⭐ NEW
+      ),
+      credential_id = "default"
+    )
+    
+    id <- showNotification("Saving data and verifying version...",
+                          duration = NULL, closeButton = FALSE, type = "default")
+
+    initial_promise <- future({
+      resp <- httr::POST(
+        url = "http://localhost:8080/add_version",
+        body = jsonlite::toJSON(current_payload_data, auto_unbox = TRUE),
+        encode = "json",
+        httr::content_type_json(),
+        httr::timeout(60)
+      )
+      httr::stop_for_status(resp, task = "save version")
+      httr::content(resp, as = "parsed")
+    })
+
+    verification_promise <- initial_promise %>%
+      promises::then(~{
+        version_prefix <- .x$version_prefix
+        zarr_url       <- .x$zarr_url
+
+        showNotification(
+          paste0("Version ", version_prefix, " created. Starting verification..."),
+          duration = 3, type = "message"
+        )
+
+        future({ check_version_async(zarr_url, version_prefix) }) %>%
+          promises::then(~ list(post = .x, check = .x))
+      })
+
+    verification_promise %>%
+      promises::then(~{
+        check <- .x$check
+        removeNotification(id)
+
+        if (check$status == "verified") {
+          showNotification(
+            paste0("Success! Version ", check$version_prefix, " saved and verified."),
+            duration = 5, type = "message"
+          )
+          version_refresh_trigger(version_refresh_trigger() + 1)
+        } else {
+          showNotification(
+            paste0("Warning: Data saved, but verification failed: ", check$message),
+            duration = NULL, type = "warning"
+          )
+        }
+      }) %>%
+      promises::catch(~{
+        removeNotification(id)
+        showNotification(
+          paste0("Save Failed: ", .x$message),
+          duration = NULL, type = "error"
+        )
+      })
+  })
+
+  output$dge_group_by_ui <- renderUI({
+    req(values$lazy_data)
+    selectInput("dge_group_by", "Group By:", choices = c("None", categorical_vars()), selected = "celltype")
+  })
+
+  output$dge_condition_1_ui <- renderUI({
+    req(values$lazy_data)
+    selectInput("dge_condition_1", "Condition A:", choices = NULL)
+  })
+
+  output$dge_condition_2_ui <- renderUI({
+    req(values$lazy_data)
+    selectInput("dge_condition_2", "Condition B:", choices = NULL)
+  })
+
+  observeEvent(input$dge_group_by, {
+    req(values$lazy_data, input$dge_group_by)
+    
+    if (input$dge_group_by == "None") {
+      updateSelectInput(session, "dge_condition_1", choices = NULL)
+      updateSelectInput(session, "dge_condition_2", choices = NULL)
+    } else {
+      group_values <- unique(values$lazy_data$get_obs_column(values$lazy_data$z, input$dge_group_by))
+      group_values <- sort(na.omit(group_values))
+      
+      updateSelectInput(session, "dge_condition_1", choices = group_values, selected = group_values[1])
+      updateSelectInput(session, "dge_condition_2", choices = group_values, selected = group_values[2])
+    }
+  })
+
+  observeEvent(input$run_dge, {
+    req(values$lazy_data, input$dge_group_by, input$dge_condition_1, input$dge_condition_2)
+    
+    # Capture input values
+    group_by <- input$dge_group_by
+    condition_1 <- input$dge_condition_1
+    condition_2 <- input$dge_condition_2
+    
+    # Validate inputs
+    if (condition_1 == condition_2) {
+      status("Error: Condition A and Condition B must be different.")
+      showNotification("Condition A and Condition B must be different.", 
+                      type = "error", duration = 5)
+      return()
+    }
+    
+    # Update status
+    status("Submitting differential expression job...")
+    showNotification("Submitting differential expression job...", 
+                    type = "message", duration = 3)
+    
+    # Start Redis worker
+    # startLocalWorkers(n = 1, queue = "scanpy_jobs2")
+    # config <- redis_config(host = "127.0.0.1", port = 6379) # Adjust as needed
+    # plan(redis, queue = "scanpy_jobs2", config = config)  
+    plan(multisession, workers = 1)
+    
+    zarr_url <- input$dataset
+    
+    # Create a temporary file for parquet output
+    output_parquet <- tempfile(fileext = ".parquet")
+    
+    # Run the future with PARQUET OUTPUT
+    f <- future({
+      library(reticulate)
+      # use_condaenv("sc_rna_env_python2", required = TRUE)
+      use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
+      source_python("./scripts/rank_genes_zarr.py")
+      
+      message("Running fast DGE analysis...")
+      
+      parquet_path <- rank_genes_zarr_to_parquet(
+        s3_path = zarr_url,
+        groupby = group_by,
+        groups = list(condition_1, condition_2),
+        output_path = output_parquet,
+        method = "t-test_overestim_var",
+        verbose = TRUE
+      )
+      
+      message("DGE analysis complete, parquet written")
+      parquet_path
+    }, 
+    seed = TRUE, 
+    globals = list(
+      group_by = group_by,
+      condition_1 = condition_1,
+      condition_2 = condition_2,
+      zarr_url = zarr_url,
+      output_parquet = output_parquet
+    ))
+    
+    # Get results with error handling
+    res <- tryCatch({
+      withProgress(message = "Running fast DGE analysis...", 
+                  value = 0, {
+        parquet_path <- value(f)
+        incProgress(0.5)
+        
+        message("Reading parquet results...")
+        res <- arrow::read_parquet(parquet_path)
+        incProgress(0.5)
+        res
+      })
+    }, error = function(e) {
+      status(paste("Error in DGE analysis:", e$message))
+      showNotification(
+        paste("Error in DGE analysis:", e$message),
+        type = "error",
+        duration = 5
+      )
+      NULL
+    })
+    
+    # Reset plan
+    plan(sequential)
+    
+    # Store results and update status
+    if (!is.null(res)) {
+      results(res) # Keep this for temporary view
+      
+      # 🆕 CREATE COMPREHENSIVE METADATA
+      analysis_metadata <- list(
+        tool = "DGE",
+        group_by = group_by,
+        condition_1 = condition_1,
+        condition_2 = condition_2,
+        analysis_date = format(Sys.Date(), "%Y-%m-%d"),
+        analysis_time = format(Sys.time(), "%H:%M:%S"),
+        n_genes = nrow(res),
+        n_significant = sum(res$pvals_adj < 0.05, na.rm = TRUE),
+        pct_significant = round(100 * mean(res$pvals_adj < 0.05, na.rm = TRUE), 1),
+        method = "t-test_overestim_var",
+        dataset = basename(input$dataset),
+        user_id = trimws(Sys.getenv("SHINYPROXY_USERNAME", "jack"))
+      )
+      
+      status(paste0("✓ Analysis completed successfully (~4-7s total) - ", 
+                  analysis_metadata$n_significant, " significant genes"))
+      
+      showNotification(
+        sprintf("✅ %s vs %s: %d genes analyzed, %d significant (%.1f%%)",
+                condition_1, condition_2, nrow(res), 
+                analysis_metadata$n_significant, 
+                analysis_metadata$pct_significant),
+        type = "message",
+        duration = 5
+      )
+      
+      # 🆕 CREATE UNIQUE LABEL AND STORE
+      timestamp_str <- format(Sys.time(), "%Y%m%d_%H%M%S")
+      version_prefix <- isolate(input$version_prefix %||% "local_default")
+      label <- paste0("DGE_", group_by, "_", condition_1, "_vs_", condition_2, "_", timestamp_str)
+      
+      results_store$all[[label]] <- list(
+        tool = "DGE",
+        data = res,
+        cloud = FALSE,
+        label = label,
+        version_prefix = version_prefix,
+        source = "local",
+        metadata = analysis_metadata,  # 🆕 STORE METADATA
+        parquet_key = timestamp_str     # 🆕 STORE TIMESTAMP FOR UPLOAD
+      )
+      
+      # 🆕 TRIGGER DROPDOWN UPDATE (This ensures new result appears immediately)
+      # Force reactive to re-evaluate
+      isolate({
+        results_store$trigger <- (results_store$trigger %||% 0) + 1
+      })
+      
+      # Optionally clean up temp file
+      unlink(output_parquet)
+    } else {
+      results(NULL)
+      status("Analysis failed")
+    }
+  })
+  
+  # Central results store (for history)
+  results_store <- reactiveValues(all = list())
+
+  # Track cloud-saved results
+  cloud_results <- reactiveValues(labels = character(0))
+
+  # Define fsspec_filesystem for S3 access
+  fsspec_filesystem <- function() {
+    fsspec <- import("fsspec")
+    creds <- jsonlite::fromJSON("credentials.json")$default
+    fsspec$filesystem("s3", key = creds$aws_access_key_id, secret = creds$aws_secret_access_key)
+  }
+
+  fetch_cloud_result_data <- function(zarr_url, version_prefix, parquet_key) {
+    flask_url <- Sys.getenv("FLASK_API_URL", "http://127.0.0.1:8080")
+    
+    tryCatch({
+      # First, try to get the list of results for this version
+      resp_list <- httr::GET(
+        url = paste0(flask_url, "/list_results"),
+        query = list(
+          zarr_url = zarr_url,
+          version_prefix = version_prefix
+        )
+      )
+      
+      if (httr::status_code(resp_list) == 200) {
+        content <- httr::content(resp_list, as = "parsed")
+        
+        # Find the matching result by parquet_key
+        if (!is.null(content$results)) {
+          matching_result <- Find(function(x) {
+            !is.null(x$parquet_key) && x$parquet_key == parquet_key
+          }, content$results)
+          
+          if (!is.null(matching_result) && !is.null(matching_result$data)) {
+            return(as.data.frame(matching_result$data))
+          }
+        }
+      }
+      
+      # If that didn't work, try a direct fetch endpoint
+      resp_direct <- httr::GET(
+        url = paste0(flask_url, "/get_result"),
+        query = list(
+          zarr_url = zarr_url,
+          version_prefix = version_prefix,
+          parquet_key = parquet_key
+        )
+      )
+      
+      if (httr::status_code(resp_direct) == 200) {
+        content <- httr::content(resp_direct, as = "parsed")
+        if (!is.null(content$data)) {
+          return(as.data.frame(content$data))
+        }
+      }
+      
+      return(NULL)
+    }, error = function(e) {
+      message("Error fetching cloud result data: ", e$message)
+      return(NULL)
+    })
+  }
+
+  # Helper to fetch cloud results
+  fetch_cloud_results <- function(zarr_url, flask_url = Sys.getenv("FLASK_API_URL", "http://127.0.0.1:8080")) {
+    resp <- httr::GET(
+      url = paste0(flask_url, "/list_results"),
+      query = list(zarr_url = zarr_url)
+    )
+    if (httr::status_code(resp) != 200) {
+      message("Failed to fetch cloud results. Status: ", httr::status_code(resp))
+      return(list())
+    }
+    parsed <- httr::content(resp, as = "parsed")
+    if (!is.list(parsed) || is.null(parsed$results)) {
+      message("Invalid response format: no 'results' field")
+      return(list())
+    }
+    results <- parsed$results
+    message("Parsed results: ", capture.output(str(results)))
+    
+    cloud_results_list <- list()
+    for (r in results) {
+      if (!is.list(r) || is.null(r$version_prefix) || !is.list(r$parquet_files)) {
+        message("Skipping invalid version entry: ", capture.output(str(r)))
+        next
+      }
+      for (p in r$parquet_files) {
+        if (!is.character(p) || !grepl("\\.parquet$", p)) {
+          message("Skipping invalid parquet file: ", capture.output(str(p)))
+          next
+        }
+        label <- paste0("DGE_", r$version_prefix, "_", sub("\\.parquet$", "", p))
+        cloud_results_list[[length(cloud_results_list) + 1]] <- list(
+          label = label,
+          version_prefix = r$version_prefix,
+          parquet_file = p,
+          zarr_url = zarr_url,
+          tool = "DGE",
+          cloud = TRUE
+        )
+      }
+    }
+    message("Cloud results list: ", capture.output(str(cloud_results_list)))
+    
+    return(cloud_results_list)
+  }
+
+  extract_comparison_info <- function(result_obj, zarr_url = NULL, credential_id = "default") {
+    tryCatch({
+      # PRIORITY 1: Check stored metadata (for LOCAL results)
+      if (!is.null(result_obj$metadata)) {
+        return(list(
+          group1 = result_obj$metadata$condition_1 %||% "Group1",
+          group2 = result_obj$metadata$condition_2 %||% "Group2",
+          date = as.Date(result_obj$metadata$analysis_date %||% Sys.Date()),
+          n_genes = result_obj$metadata$n_genes %||% nrow(result_obj$data),
+          n_significant = result_obj$metadata$n_significant %||% NA,
+          pct_significant = result_obj$metadata$pct_significant %||% NA,
+          groupby = result_obj$metadata$group_by %||% "unknown"
+        ))
+      }
+      
+      # PRIORITY 2: Fetch from cloud (for CLOUD results)
+      if (result_obj$cloud && !is.null(result_obj$version_prefix) && !is.null(zarr_url)) {
+        flask_url <- Sys.getenv("FLASK_API_URL", "http://127.0.0.1:8080")
+        
+        # Extract parquet key from label or parquet_file
+        parquet_key <- if (!is.null(result_obj$parquet_key)) {
+          result_obj$parquet_key
+        } else if (!is.null(result_obj$parquet_file)) {
+          sub("\\.parquet$", "", result_obj$parquet_file)
+        } else {
+          sub("^.*_(\\d{8}_\\d{6})$", "\\1", result_obj$label)
+        }
+        
+        resp <- httr::GET(
+          url = paste0(flask_url, "/get_result_metadata"),
+          query = list(
+            zarr_url = zarr_url,
+            version_prefix = result_obj$version_prefix,
+            parquet_key = parquet_key
+          ),
+          httr::timeout(10)
+        )
+        
+        if (httr::status_code(resp) == 200) {
+          metadata <- httr::content(resp, as = "parsed")
+          return(list(
+            group1 = metadata$condition_1 %||% "Group1",
+            group2 = metadata$condition_2 %||% "Group2",
+            date = as.Date(metadata$analysis_date %||% Sys.Date()),
+            n_genes = metadata$n_genes %||% NA,
+            n_significant = metadata$n_significant %||% NA,
+            pct_significant = metadata$pct_significant %||% NA,
+            groupby = metadata$group_by %||% "unknown"
+          ))
+        }
+      }
+      
+      NULL
+    }, error = function(e) {
+      message("Could not extract comparison info: ", e$message)
+      NULL
+    })
+  }
+
+  # 🆕 ENHANCED available_dge_results() with better display names
+  available_dge_results <- reactive({
+    req(input$dataset, input$version_prefix)
+    
+    # Add dependency on trigger to force re-evaluation when new results added
+    results_store$trigger
+    
+    zarr_url <- normalize_url(input$dataset)
+    version_prefix <- input$version_prefix
+    
+    message("\n🔄 Refreshing available DGE results...")
+    message("   Dataset: ", basename(input$dataset))
+    message("   Version prefix: ", version_prefix)
+    
+    # 🆕 CHECK IF DATASET IS CLOUD-BASED
+    is_cloud_dataset <- grepl("^s3://|^https?://", zarr_url)
+    message("   Is cloud dataset: ", is_cloud_dataset)
+    
+    # 1. Fetch cloud results ONLY if dataset is cloud-based
+    cloud_filtered <- list()
+    if (is_cloud_dataset) {
+      cloud_results_list <- tryCatch({
+        fetch_cloud_results(zarr_url)
+      }, error = function(e) {
+        message("   ⚠️ Failed to fetch cloud results: ", e$message)
+        list()
+      })
+      message("   Fetched ", length(cloud_results_list), " cloud results from API")
+      
+      # 2. Filter cloud results by version_prefix
+      if (length(cloud_results_list) > 0) {
+        cloud_filtered <- Filter(function(x) {
+          identical(x$version_prefix, version_prefix)
+        }, cloud_results_list)
+      }
+      message("   After version filtering: ", length(cloud_filtered), " cloud results")
+    } else {
+      message("   Skipping cloud fetch for local dataset")
+    }
+    
+    # 3. Get local results (all versions)
+    local_all <- Filter(function(x) x$tool == "DGE", results_store$all)
+    message("   Found ", length(local_all), " local results in store")
+    
+    # 4. Filter local results by version_prefix AND ensure they're actually local
+    local_filtered <- list()
+    if (length(local_all) > 0) {
+      local_filtered <- Filter(function(x) {
+        # 🆕 MUST be local source AND match version (or have no version)
+        is_local <- is.null(x$source) || x$source == "local"
+        matches_version <- is.null(x$version_prefix) || identical(x$version_prefix, version_prefix)
+        is_local && matches_version
+      }, local_all)
+    }
+    message("   After filtering: ", length(local_filtered), " local results")
+    
+    # 5. Build final list WITH ENHANCED DISPLAY NAMES
+    results_list <- list()
+    
+    # Helper function to create display name
+    create_display_name <- function(comparison_info, compact = TRUE) {
+      if (is.null(comparison_info)) {
+        return(NULL)
+      }
+      
+      max_length <- if (compact) 10 else 15
+      
+      group1 <- if (nchar(comparison_info$group1) > max_length) {
+        paste0(substr(comparison_info$group1, 1, max_length - 2), "...")
+      } else {
+        comparison_info$group1
+      }
+      
+      group2 <- if (nchar(comparison_info$group2) > max_length) {
+        paste0(substr(comparison_info$group2, 1, max_length - 2), "...")
+      } else {
+        comparison_info$group2
+      }
+      
+      if (compact) {
+        groupby_part <- if (!is.null(comparison_info$groupby) && comparison_info$groupby != "unknown") {
+          paste0(substr(comparison_info$groupby, 1, 8), ": ")
+        } else {
+          ""
+        }
+        
+        display_name <- sprintf(
+          "%s%s vs %s (%s)",
+          groupby_part,
+          group1,
+          group2,
+          format(comparison_info$date, "%m/%d")
+        )
+        
+        if (!is.na(comparison_info$n_genes)) {
+          genes_k <- if (comparison_info$n_genes >= 1000) {
+            paste0(round(comparison_info$n_genes / 1000, 1), "K")
+          } else {
+            as.character(comparison_info$n_genes)
+          }
+          display_name <- paste0(display_name, " • ", genes_k)
+        }
+        
+        if (!is.na(comparison_info$n_significant)) {
+          display_name <- paste0(display_name, " • ", comparison_info$n_significant, "↑")
+        }
+        
+      } else {
+        groupby_prefix <- if (!is.null(comparison_info$groupby) && comparison_info$groupby != "unknown") {
+          paste0("[", comparison_info$groupby, "] ")
+        } else {
+          ""
+        }
+        
+        display_name <- sprintf(
+          "%s%s vs %s (%s)",
+          groupby_prefix,
+          group1,
+          group2,
+          format(comparison_info$date, "%b %d")
+        )
+        
+        if (!is.na(comparison_info$n_genes)) {
+          display_name <- paste0(display_name, sprintf(" • %s genes", 
+                                                      format(comparison_info$n_genes, big.mark = ",")))
+        }
+        
+        if (!is.na(comparison_info$n_significant)) {
+          display_name <- paste0(display_name, sprintf(" • %d sig", comparison_info$n_significant))
+        }
+      }
+      
+      display_name
+    }
+    
+    # Cloud results (only if cloud dataset)
+    if (is_cloud_dataset && length(cloud_filtered) > 0) {
+      for (res in cloud_filtered) {
+        label <- res$label
+        comparison_info <- extract_comparison_info(res, zarr_url, credential_id = "default")
+        display_name <- create_display_name(comparison_info, compact = TRUE) %||% label
+        
+        results_list[[label]] <- c(res, list(
+          source = "cloud",
+          display_name = display_name
+        ))
+      }
+    }
+    
+    # Local results (should not duplicate cloud results anymore)
+    cloud_labels <- names(results_list)
+    if (length(local_filtered) > 0) {
+      for (label in names(local_filtered)) {
+        # Skip if this label is already in cloud results
+        if (label %in% cloud_labels) {
+          message("   ⚠️ Skipping duplicate: ", label, " (already in cloud)")
+          next
+        }
+        
+        res <- local_filtered[[label]]
+        comparison_info <- extract_comparison_info(res, zarr_url = NULL)
+        display_name <- create_display_name(comparison_info, compact = TRUE) %||% label
+        
+        results_list[[label]] <- c(res, list(
+          source = "local",
+          display_name = display_name
+        ))
+      }
+    }
+    
+    # 🆕 FIX: Safely count cloud vs local
+    if (length(results_list) > 0) {
+      # Use unlist() to ensure we get a logical vector
+      n_cloud <- sum(unlist(lapply(results_list, function(x) {
+        identical(x$source, "cloud")
+      })))
+      n_local <- sum(unlist(lapply(results_list, function(x) {
+        identical(x$source, "local")
+      })))
+    } else {
+      n_cloud <- 0
+      n_local <- 0
+    }
+    
+    message("✅ Final results: ", length(results_list), " total")
+    message("   Cloud: ", n_cloud)
+    message("   Local: ", n_local)
+    
+    results_list
+  })
+
+  
+
+  # ===================================================================
+  # UPDATE DROPDOWN whenever dataset, version_prefix, or new results appear
+  # ===================================================================
+  # 🆕 UPDATE DROPDOWN with enhanced display names and no duplicates
+  observe({
+    results_list <- available_dge_results()
+    
+    if (length(results_list) == 0) {
+      updateSelectInput(session, "previous_result", choices = character(0), selected = character(0))
+      return()
+    }
+    
+    # Sort by timestamp (newest first)
+    labels <- names(results_list)
+    timestamps <- sapply(labels, function(label) {
+      # Extract timestamp: DGE_..._20251109_151317 -> 20251109151317
+      ts_str <- sub("^.*_(\\d{8}_\\d{6})$", "\\1", label)
+      if (grepl("^\\d{8}_\\d{6}$", ts_str)) {
+        as.numeric(gsub("_", "", ts_str))
+      } else {
+        0  # Put malformed labels at the end
+      }
+    })
+    
+    order_idx <- order(timestamps, decreasing = TRUE)
+    labels <- labels[order_idx]
+    
+    # Get display names and sources
+    display_names <- sapply(labels, function(label) {
+      results_list[[label]]$display_name %||% label
+    })
+    
+    sources <- sapply(labels, function(label) {
+      results_list[[label]]$source
+    })
+    
+    # 🆕 Add source prefix with better emojis and spacing
+    display_labels <- ifelse(
+      sources == "cloud",
+      paste0("☁️  ", display_names),  # Extra space for readability
+      paste0("💻  ", display_names)
+    )
+    
+    # Preserve current selection if it still exists
+    current_selection <- input$previous_result
+    
+    # 🆕 If current selection was just uploaded, it's now cloud - keep it selected
+    if (!is.null(current_selection)) {
+      # Strip any emoji prefix for comparison
+      clean_selection <- sub("^☁️  |^💻  ", "", current_selection)
+      if (clean_selection %in% labels) {
+        current_selection <- clean_selection
+      } else if (!current_selection %in% labels) {
+        current_selection <- character(0)
+      }
+    } else {
+      current_selection <- character(0)
+    }
+    
+    updateSelectInput(
+      session,
+      "previous_result",
+      choices = setNames(labels, display_labels),
+      selected = current_selection
+    )
+    
+    cat("📋 Dropdown updated with", length(labels), "results\n")
+    cat("   Sources: Cloud =", sum(sources == "cloud"), ", Local =", sum(sources == "local"), "\n")
+  }) |> 
+    bindEvent(
+      input$dataset,
+      input$version_prefix,
+      available_dge_results(),
+      ignoreNULL = FALSE
+    )
+
+  # Save to cloud
+  observeEvent(input$save_to_cloud, {
+    tool <- input$result_tool
+    req(tool == "DGE", results(), input$version_prefix)
+    
+    # CHECK IF DATASET IS CLOUD-BASED
+    zarr_url <- normalize_url(input$dataset)
+    is_cloud_dataset <- grepl("^s3://|^https?://", zarr_url)
+    
+    if (!is_cloud_dataset) {
+      showNotification(
+        "⚠️ Cannot save to cloud: Dataset is local. Only cloud datasets support versioning.",
+        type = "warning",
+        duration = 5
+      )
+      return()
+    }
+    
+    user_id <- trimws(Sys.getenv("SHINYPROXY_USERNAME"))
+    if (is.na(user_id) || user_id == "") {
+      user_id <- "jack"
+    }
+    
+    version_prefix <- input$version_prefix
+    
+    # 🆕 HANDLE "ORIGINAL" VERSION - MUST CREATE A NEW VERSION
+    if (version_prefix == "original") {
+      showModal(modalDialog(
+        title = "Create Version First",
+        div(
+          p("You're currently on the 'original' version. To save analysis results to the cloud, you need to create a version first."),
+          p(strong("This version will capture your current cell selection/filtering state.")),
+          hr(),
+          textInput("new_version_name", "Version Name:", 
+                  value = paste0("analysis_", format(Sys.Date(), "%Y%m%d")),
+                  placeholder = "e.g., filtered_bcells")
+        ),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton("create_and_save", "Create Version & Save Results", class = "btn-primary")
+        ),
+        easyClose = FALSE
+      ))
+      return()
+    }
+    
+    # For non-original versions, continue with normal save flow
+    selected_label <- sub("^☁️  |^💻  ", "", input$previous_result)
+    
+    # Get the result object to access metadata
+    result_obj <- results_store$all[[selected_label]]
+    req(result_obj)
+    
+    parquet_key <- result_obj$parquet_key %||% sub("^.*_(\\d{8}_\\d{6})$", "\\1", selected_label)
+    
+    if (parquet_key == selected_label || !grepl("^\\d{8}_\\d{6}$", parquet_key)) {
+      showNotification("Error: Could not parse timestamp from result label.", type = "error")
+      return()
+    }
+    
+    # Validate version_prefix
+    flask_url <- Sys.getenv("FLASK_API_URL", "http://127.0.0.1:8080")
+  
+    # Write parquet locally first
+    local_parquet <- tempfile(fileext = ".parquet")
+    arrow::write_parquet(results(), local_parquet)
+    
+    # Verify file size
+    file_size <- file.info(local_parquet)$size / 1024  # KB
+    cat("📦 Local parquet size:", round(file_size, 2), "KB\n")
+    
+    # Prepare metadata to send with upload
+    metadata_to_send <- result_obj$metadata %||% list(
+      tool = "DGE",
+      analysis_date = format(Sys.Date(), "%Y-%m-%d"),
+      n_genes = nrow(results()),
+      user_id = user_id
+    )
+    
+    id <- showNotification("Uploading DGE results...", duration = NULL, closeButton = FALSE, type = "default")
+    
+    # Upload via multipart with metadata
+    future({
+      resp <- httr::POST(
+        url = paste0(flask_url, "/upload_parquet"),
+        body = list(
+          zarr_url = zarr_url,
+          user_id = user_id,
+          version_prefix = version_prefix,
+          parquet_key = parquet_key,
+          metadata = jsonlite::toJSON(metadata_to_send, auto_unbox = TRUE),
+          file = httr::upload_file(local_parquet)
+        ),
+        encode = "multipart",
+        httr::timeout(300)
+      )
+      httr::stop_for_status(resp, task = "upload parquet")
+      httr::content(resp, as = "parsed")
+    }) %...>%
+      (function(response) {
+        removeNotification(id)
+        
+        # Verify uploaded size
+        if (!is.null(response$uploaded_size_kb)) {
+          cat("☁️ Cloud parquet size:", response$uploaded_size_kb, "KB\n")
+          if (abs(response$uploaded_size_kb - file_size) > 1) {
+            showNotification("⚠️ Size mismatch detected!", type = "warning", duration = 5)
+          }
+        }
+        
+        # REMOVE from local store (it's now in cloud)
+        if (selected_label %in% names(results_store$all)) {
+          results_store$all[[selected_label]] <- NULL
+          cat("✅ Removed", selected_label, "from local store (now in cloud)\n")
+        }
+        
+        showNotification(
+          sprintf("✅ %s saved to cloud (version: %s)",
+                  result_obj$metadata$condition_1 %||% "Results",
+                  version_prefix),
+          duration = 5, type = "message"
+        )
+        
+        # Force dropdown refresh
+        isolate({
+          results_store$trigger <- (results_store$trigger %||% 0) + 1
+        })
+      }) %...!%
+      (function(error) {
+        removeNotification(id)
+        showNotification(
+          paste0("❌ Upload Failed: ", error$message),
+          duration = NULL, type = "error"
+        )
+      })
+    
+    # Clean up temp file
+    later::later(~ unlink(local_parquet), delay = 5)
+  })
+
+  # 🆕 HANDLE CREATE VERSION THEN SAVE
+  observeEvent(input$create_and_save, {
+    req(input$new_version_name)
+    
+    new_version_name <- trimws(input$new_version_name)
+    
+    if (new_version_name == "" || new_version_name == "original") {
+      showNotification("Please provide a valid version name (not 'original')", 
+                      type = "error", duration = 3)
+      return()
+    }
+    
+    removeModal()
+    
+    # Step 1: Create the version
+    N_TOTAL_CELLS <- nrow(values$lazy_data$df)
+    
+    subset_info <- subset_indices_reactive()
+    subset_indices <- subset_info$combined
+    
+    full_cell_mask <- rep(FALSE, N_TOTAL_CELLS)
+    if (length(subset_indices) > 0) full_cell_mask[subset_indices] <- TRUE
+    
+    vis_cat <- unlist(visible_categories()$visibleIndices %||% integer(0))
+    sel_points <- unlist(selected_points()$selectedIndices %||% integer(0))
+    numeric_filters_state <- input$applyFilters
+    
+    user_id <- trimws(Sys.getenv("SHINYPROXY_USERNAME"))
+    if (is.na(user_id) || user_id == "") user_id <- "jack"
+    
+    version_prefix <- paste0(user_id, "_", new_version_name)
+    zarr_url <- normalize_url(input$dataset)
+    
+    create_payload <- list(
+      zarr_url = zarr_url,
+      user_id = user_id,
+      version_prefix = version_prefix,
+      metadata = list(
+        filter_criterion = "Created for analysis results",
+        n_filtered_cells = length(subset_indices),
+        analysis_date = format(Sys.Date(), "%Y-%m-%d"),
+        umap_colorby = input$colorBy,
+        has_numeric_filters = !is.null(numeric_filters_state) && 
+                            numeric_filters_state != "" && 
+                            numeric_filters_state != "[]",
+        numeric_filters = if (!is.null(numeric_filters_state) && 
+                            numeric_filters_state != "" && 
+                            numeric_filters_state != "[]") {
+          jsonlite::fromJSON(numeric_filters_state)
+        } else {
+          list()
+        }
+      ),
+      zarr_arrays = list(
+        cell_mask = I(full_cell_mask),
+        visible_categories = I(vis_cat),
+        selected_points = I(sel_points)
+      ),
+      credential_id = "default"
+    )
+    
+    id <- showNotification("Creating version and saving results...",
+                          duration = NULL, closeButton = FALSE, type = "default")
+    
+    # Step 2: Create version, then save results
+    future({
+      # Create version
+      resp1 <- httr::POST(
+        url = "http://localhost:8080/add_version",
+        body = jsonlite::toJSON(create_payload, auto_unbox = TRUE),
+        encode = "json",
+        httr::content_type_json(),
+        httr::timeout(60)
+      )
+      httr::stop_for_status(resp1, task = "create version")
+      
+      version_info <- httr::content(resp1, as = "parsed")
+      
+      # Now upload results to this new version
+      selected_label <- sub("^☁️  |^💻  ", "", input$previous_result)
+      result_obj <- results_store$all[[selected_label]]
+      parquet_key <- result_obj$parquet_key %||% sub("^.*_(\\d{8}_\\d{6})$", "\\1", selected_label)
+      
+      local_parquet <- tempfile(fileext = ".parquet")
+      arrow::write_parquet(results(), local_parquet)
+      
+      metadata_to_send <- result_obj$metadata %||% list(
+        tool = "DGE",
+        analysis_date = format(Sys.Date(), "%Y-%m-%d"),
+        n_genes = nrow(results()),
+        user_id = user_id
+      )
+      
+      resp2 <- httr::POST(
+        url = "http://localhost:8080/upload_parquet",
+        body = list(
+          zarr_url = zarr_url,
+          user_id = user_id,
+          version_prefix = version_prefix,
+          parquet_key = parquet_key,
+          metadata = jsonlite::toJSON(metadata_to_send, auto_unbox = TRUE),
+          file = httr::upload_file(local_parquet)
+        ),
+        encode = "multipart",
+        httr::timeout(300)
+      )
+      httr::stop_for_status(resp2, task = "upload parquet")
+      
+      unlink(local_parquet)
+      
+      list(
+        version = httr::content(resp1, as = "parsed"),
+        upload = httr::content(resp2, as = "parsed")
+      )
+    }) %...>%
+      (function(response) {
+        removeNotification(id)
+        
+        # Remove from local store
+        selected_label <- sub("^☁️  |^💻  ", "", input$previous_result)
+        if (selected_label %in% names(results_store$all)) {
+          results_store$all[[selected_label]] <- NULL
+        }
+        
+        showNotification(
+          sprintf("✅ Version '%s' created and results saved!", new_version_name),
+          duration = 5, type = "message"
+        )
+        
+        # Update version dropdown to include new version
+        version_refresh_trigger(version_refresh_trigger() + 1)
+        
+        # Select the new version
+        updateSelectInput(session, "version_prefix", selected = version_prefix)
+        
+        # Force results dropdown refresh
+        isolate({
+          results_store$trigger <- (results_store$trigger %||% 0) + 1
+        })
+      }) %...!%
+      (function(error) {
+        removeNotification(id)
+        showNotification(
+          paste0("❌ Failed: ", error$message),
+          duration = NULL, type = "error"
+        )
+      })
+  })
+
+  output$analysis_display <- renderUI({
+    req(input$result_tool)
+    tagList(
+      h4(paste("Results for", input$result_tool)),
+      
+      # conditionalPanel(
+      #   condition = "output.has_results == true",
+      #   div(
+      #     style = "margin-bottom: 10px;",
+      #     downloadButton("download_result", "⬇️ Download CSV", class = "btn-secondary btn-sm"),
+      #     actionButton("save_to_cloud", "☁️ Save to Cloud", class = "btn-success btn-sm")
+      #   )
+      # ),
+      
+      # VOLCANO PLOT + TABLE FOR DGE (OPTIMIZED)
+      conditionalPanel(
+        condition = "input.result_tool == 'DGE' && output.has_results == true",
+        fluidRow(
+          # VOLCANO PLOT (left - 7 columns for more space)
+          column(7,
+            h5("🌋 Volcano Plot"),
+            p("Click or brush to select genes | Click background to deselect", 
+              style = "font-size: 0.85em; color: #666; margin-bottom: 10px;"),
+            my_scatterplotOutput("volcano_plot", height = "700px", width = "100%")  # Taller for better view
+          ),
+          
+          # GENES TABLE (right - 5 columns)
+          column(5,
+            h5("📋 Selected Genes"),
+            div(
+              style = "margin-bottom: 10px;",
+              radioButtons("volcano_table_mode", NULL, inline = TRUE,
+                          choices = list(
+                            "Top 1000 + Selected" = "all",
+                            "Selected only" = "selected"
+                          ),
+                          selected = "all"),
+              # Info text
+              uiOutput("volcano_table_info")
+            ),
+            DT::dataTableOutput("volcano_genes_table", height = "650px")
+          )
+        ),
+        hr()
+      ),
+      
+      # DT::dataTableOutput("results_table")
+    )
+  })
+
+  output$save_to_cloud_button_ui <- renderUI({
+    req(input$dataset)
+    
+    zarr_url <- normalize_url(input$dataset)
+    is_cloud_dataset <- grepl("^s3://|^https?://", zarr_url)
+    
+    if (is_cloud_dataset) {
+      div(
+        style = "margin-top: 25px;",
+        actionButton("save_to_cloud", "☁️ Save", 
+                    class = "btn-success btn-sm",
+                    style = "width: 100%;")
+      )
+    } else {
+      div(
+        style = "margin-top: 25px;",
+        tags$span(
+          class = "label label-default",
+          style = "display: block; padding: 6px; text-align: center; font-size: 11px;",
+          "💻 Local dataset"
+        )
+      )
+    }
+  })
+
+  
+  # ===================================================================
+  # REACTIVE: Currently selected DGE result (local OR cloud)
+  # ===================================================================
+  current_dge_result <- reactive({
+    req(input$previous_result, input$version_prefix)
+    
+    selected_label <- sub("^(Cloud|Local) ", "", input$previous_result)
+    message("Loading public result: ", selected_label)
+    
+    # LOCAL FIRST
+    local <- results_store$all[[selected_label]]
+    if (!is.null(local) && local$tool == "DGE") {
+      message("Local cache hit: ", nrow(local$data), " rows")
+      return(local)
+    }
+
+    # === PUBLIC HTTPS DIRECT READ ===
+    base_url <- input$dataset  # ← ALREADY PUBLIC HTTPS URL
+    # Example: https://scrnaseq-browser.s3.us-east-2.amazonaws.com/corrected_....zarr
+    
+    # Extract timestamp from label: DGE_jack_test_20251109_133651 → 20251109_133651
+    timestamp <- sub("^.*_(\\d{8}_\\d{6})$", "\\1", selected_label)
+    if (timestamp == selected_label) {
+      showNotification("Cannot parse timestamp", type = "error")
+      return(NULL)
+    }
+    
+    parquet_file <- paste0(timestamp, ".parquet")
+    public_url <- file.path(
+      base_url, 
+      "versions", 
+      input$version_prefix, 
+      "results", 
+      parquet_file
+    )
+    
+    message("PUBLIC DIRECT LOAD: ", public_url)
+    
+    pt <- proc.time()
+    df <- tryCatch({
+      arrow::read_parquet(public_url)
+    }, error = function(e) {
+      showNotification(paste("Load failed:", e$message), type = "error")
+      message("ERROR: ", e$message)
+      NULL
+    })
+    
+    req(df, nrow(df) > 0)
+    
+    message("PUBLIC LOAD SUCCESS: ", nrow(df), " rows in ", 
+      round((proc.time() - pt)[3], 3), "s")
+    
+    list(
+      tool = "DGE",
+      data = df,
+      cloud = TRUE,
+      label = selected_label,
+      version_prefix = input$version_prefix,
+      source = "public"
+    )
+  })
+
+  # ===================================================================
+  # VOLCANO PLOT - Now works for BOTH local and cloud
+  # ===================================================================
+  output$volcano_plot <- renderMy_scatterplot({
+    req(input$result_tool == "DGE")
+    
+    result_data <- current_dge_result()
+    req(result_data, result_data$data)
+    
+    df <- result_data$data
+    
+    # === [REST OF YOUR VOLCANO CODE - UNCHANGED] ===
+    # Gene naming
+    if ("names" %in% colnames(df)) {
+      df$gene <- df$names
+    } else if ("gene" %in% colnames(df)) {
+      df$gene <- df$gene
+    } else if (!is.null(rownames(df)) && !all(rownames(df) == as.character(1:nrow(df)))) {
+      df$gene <- rownames(df)
+    } else {
+      df$gene <- paste0("Gene_", seq_len(nrow(df)))
+    }
+    
+    df$neg_log10_padj <- -log10(pmax(df$pvals_adj, 1e-300))
+    max_finite <- max(df$neg_log10_padj[is.finite(df$neg_log10_padj)], na.rm = TRUE)
+    df$neg_log10_padj[is.infinite(df$neg_log10_padj)] <- max_finite * 1.2
+    
+    df$significant <- ifelse(
+      df$pvals_adj < 0.05 & abs(df$logfoldchanges) > 1, 
+      "Significant", "Not Significant"
+    )
+    
+    valid_idx <- !is.na(df$logfoldchanges) & !is.na(df$neg_log10_padj)
+    df <- df[valid_idx, ]
+    
+    x_axis_limit <- 10
+    y_axis_limit <- 50
+    
+    df$logfoldchanges_capped <- pmax(-x_axis_limit, pmin(x_axis_limit, df$logfoldchanges))
+    df$neg_log10_padj_capped <- pmin(y_axis_limit, df$neg_log10_padj)
+    df$is_capped <- (abs(df$logfoldchanges) > x_axis_limit) | (df$neg_log10_padj > y_axis_limit)
+    
+    # Store for table
+    current_checksum <- digest::digest(df$gene)
+    if (is.null(volcano_table_data()) || digest::digest(volcano_table_data()$gene) != current_checksum) {
+      volcano_table_data(df)
+      volcano_selected_indices(integer(0))
+    }
+    
+    df <- volcano_table_data()
+    req(df)
+    selected <- volcano_selected_indices()
+    
+    categories <- rep("Not Significant", nrow(df))
+    categories[df$significant == "Significant"] <- "Significant"
+    capped_idx <- which(df$is_capped)
+    if (length(capped_idx) > 0) {
+      categories[capped_idx] <- paste0(categories[capped_idx], "_Capped")
+    }
+    if (length(selected) > 0) {
+      for (idx in selected) {
+        base <- if (df$significant[idx] == "Significant") "Selected_Significant" else "Selected"
+        categories[idx] <- if (df$is_capped[idx]) paste0(base, "_Capped") else base
+      }
+    }
+    
+    color_palette <- c(
+      "Not Significant" = "#CCCCCC",
+      "Not Significant_Capped" = "#999999",
+      "Significant" = "#E74C3C",
+      "Significant_Capped" = "#C0392B",
+      "Selected" = "#F1C40F",
+      "Selected_Capped" = "#F39C12",
+      "Selected_Significant" = "#D35400",
+      "Selected_Significant_Capped" = "#A04000"
+    )
+    
+    point_size <- if (nrow(df) > 10000) 2 else if (nrow(df) > 5000) 3 else 4
+    
+    data_version <- digest::digest(list(df$gene, df$logfoldchanges_capped, df$neg_log10_padj_capped, categories))
+    unique_id <- paste0("volcano_", substr(data_version, 1, 8))
+    
+    my_scatterplot(
+      x = df$logfoldchanges_capped,
+      y = df$neg_log10_padj_capped,
+      colorBy = categories,
+      custom_palette = color_palette,
+      xlab = "log2 Fold Change",
+      ylab = "-log10(adjusted p-value)",
+      xrange = c(-10, 10),
+      yrange = c(0, 50),
+      showAxes = TRUE,
+      showTooltip = TRUE,
+      opacity = 0.6,
+      size = point_size,
+      backgroundColor = "#FFFFFF",
+      legend_title = "Significance",
+      enableDownload = TRUE,
+      gene_names = df$gene,
+      plotId = "volcano_plot",
+      elementId = unique_id,
+      dataVersion = data_version
+    )
+  })
+
+  # --- INFO TEXT ABOUT TABLE CONTENT ---
+  output$volcano_table_info <- renderUI({
+    req(volcano_table_data())
+    
+    n_total <- nrow(volcano_table_data())
+    n_selected <- length(volcano_selected_indices())
+    
+    if (input$volcano_table_mode == "all") {
+      p(paste0("Showing top ", min(1000, n_total), " genes (including ", 
+              n_selected, " selected)."),
+        style = "font-size: 0.8em; color: #666; margin: 5px 0;")
+    } else { # mode == "selected"
+      p(paste0("Showing ", n_selected, " selected genes."),
+        style = "font-size: 0.8em; color: #666; margin: 5px 0;")
+    }
+  })
+
+  # --- INITIAL TABLE RENDER ---
+  output$volcano_genes_table <- DT::renderDataTable({
+    req(volcano_table_data())
+    
+    df <- volcano_table_data()
+    result <- prepare_volcano_table(df, integer(0), "all", max_rows = 1000)
+    
+    cat("📋 Table: rendering", nrow(result$display), "rows\n")
+    
+    DT::datatable(
+      result$display,
+      selection = list(mode = 'multiple', selected = result$selected_rows),
+      options = list(
+        pageLength = 50,
+        scrollY = "580px", 
+        scrollCollapse = TRUE,
+        dom = 'ftp', 
+        ordering = TRUE, 
+        order = list(list(1, 'desc'), list(4, 'desc')),
+        searching = TRUE,
+        deferRender = TRUE,
+        # PROPER way to hide column - use columnDefs
+        columnDefs = list(
+          list(targets = 1, visible = FALSE)  # Hide Sel column (0-indexed, so column 1)
+        ),
+        rowCallback = DT::JS(
+          "function(row, data, index) {",
+          "  // data[5] is 'Status' column",
+          "  if (data[5] === 'Significant') {",
+          "    $(row).addClass('significant-row');",
+          "  }",
+          "  // data[1] is the 'Sel' column (hidden but still in data)",
+          "  if (data[1] === true) {",
+          "    $(row).addClass('selected-row-highlight');",
+          "  }",
+          "}"
+        )
+      ),
+      rownames = FALSE,
+      filter = 'none'
+    ) %>%
+      DT::formatStyle(
+        'Status',
+        color = DT::styleEqual('Significant', '#d32f2f'),
+        fontWeight = DT::styleEqual('Significant', 'bold')
+      )
+  })
+
+  # --- OBSERVER: Update table when selection or mode changes (OPTIMIZED) ---
+  observe({
+    req(volcano_table_data())
+    req(input$previous_result)  # Add this line to watch for result changes
+    
+    selected <- volcano_selected_indices()
+    mode <- input$volcano_table_mode
+    df <- volcano_table_data()
+    
+    # Generate the data frame for the current view
+    result <- prepare_volcano_table(df, selected, mode, max_rows = 1000)
+    
+    cat("📋 Table update:", nrow(result$display), "rows,", length(selected), "selected\n")
+    
+    # Use replaceData for speed
+    proxy <- DT::dataTableProxy("volcano_genes_table")
+    # Reset paging if mode changed, otherwise keep it
+    reset_paging <- !is.null(isolate(input$volcano_table_mode)) && 
+                    isolate(input$volcano_table_mode) != mode
+                    
+    proxy %>% DT::replaceData(result$display, resetPaging = reset_paging, rownames = FALSE)
+    
+    # Update row selection
+    if (length(result$selected_rows) > 0) {
+      shinyjs::delay(50, {
+        proxy %>% DT::selectRows(result$selected_rows)
+      })
+    } else {
+      shinyjs::delay(50, {
+        proxy %>% DT::selectRows(NULL)
+      })
+    }
+  }) %>% bindEvent(volcano_selected_indices(), input$volcano_table_mode, input$previous_result, ignoreNULL = FALSE)
+
+
+  # --- OBSERVER: Handle Plot Selection ---
+  observeEvent(input$volcano_plot_selected, {
+    if (volcano_updating_from_table()) return()
+    
+    volcano_updating_from_plot(TRUE)
+    on.exit(volcano_updating_from_plot(FALSE))
+    
+    indices_raw <- input$volcano_plot_selected$indices
+    
+    # Handle list or atomic vector from reglScatterplot
+    if (is.list(indices_raw)) {
+      indices_0based <- unlist(indices_raw, use.names = FALSE)
+    } else {
+      indices_0based <- as.numeric(indices_raw)
+    }
+    
+    if (length(indices_0based) > 0) {
+      # Convert to 1-based indices for R data frames
+      full_indices_1based <- sort(unique(indices_0based + 1))
+      volcano_selected_indices(full_indices_1based)
+    } else {
+      volcano_selected_indices(integer(0))
+    }
+  })
+
+  # --- OBSERVER: Handle Table Row Selection ---
+  observeEvent(input$volcano_genes_table_rows_selected, {
+    # If the selection update is coming *from the plot*, ignore it here
+    if (volcano_updating_from_plot()) return()
+    
+    volcano_updating_from_table(TRUE)
+    on.exit(volcano_updating_from_table(FALSE))
+    
+    table_rows <- input$volcano_genes_table_rows_selected
+    
+    if (length(table_rows) > 0) {
+      req(volcano_table_data())
+      
+      df <- volcano_table_data()
+      selected_current <- volcano_selected_indices()
+      
+      # Re-calculate the current table view to get the correct original_indices for the selected rows
+      current_table_result <- prepare_volcano_table(df, selected_current, input$volcano_table_mode, max_rows = 1000)
+      
+      # Map the selected table rows back to the full dataset indices
+      selected_genes <- current_table_result$display$Gene[table_rows]
+      full_indices <- which(df$gene %in% selected_genes)
+      
+      full_indices <- full_indices[!is.na(full_indices)]
+      volcano_selected_indices(sort(full_indices))
+      
+      # Send to plot
+      plot_indices_0based <- full_indices - 1
+      session$sendCustomMessage("select_plot_points", list(
+        indices = plot_indices_0based
+      ))
+    } else {
+      volcano_selected_indices(integer(0))
+      session$sendCustomMessage("clear_plot_selection", list())
+    }
+  })
+
+  # Download handler
+  output$download_volcano <- downloadHandler(
+    filename = function() {
+      paste0("volcano_plot_", Sys.Date(), ".png")
+    },
+    content = function(file) {
+      showNotification("Use the widget's download button to export the plot", type = "info")
+    }
+  )
+
+
+  
+  # Global cache for already-loaded cloud results
+  cloud_cache <- new.env(parent = emptyenv())
+
+  # Reactive flag for whether results exist
+  output$has_results <- reactive({
+    !is.null(input$previous_result) && input$previous_result != ""
+  })
+  outputOptions(output, "has_results", suspendWhenHidden = FALSE)
+
+  # Download currently shown result
+  output$download_result <- downloadHandler(
+    filename = function() paste0(input$result_tool, "_results_", Sys.Date(), ".csv"),
+    content = function(file) {
+      data <- switch(input$result_tool,
+        "DGE" = {
+          selected_label <- input$previous_result
+          if (!is.null(selected_label) && nzchar(selected_label)) {
+            if (selected_label %in% names(results_store$all)) {
+              results_store$all[[selected_label]]$data
+            } else if (grepl("^DGE_", selected_label)) {
+              version_prefix <- sub("^DGE_([^_]+)_.*", "\\1", selected_label)
+              parquet_key <- sub("^DGE_[a-zA-Z0-9_-]+_", "", selected_label)
+              zarr_url <- normalize_url(input$dataset)
+              fs <- fsspec_filesystem()
+              parquet_path <- sprintf("%s/versions/%s/results/%s.parquet", zarr_url, version_prefix, parquet_key)
+              if (fs$exists(parquet_path)) {
+                arrow::read_parquet(parquet_path)
+              } else {
+                NULL
+              }
+            } else {
+              NULL
+            }
+          } else {
+            results()
+          }
+        },
+        "Clustering" = NULL,
+        "Enrichment" = NULL
+      )
+      req(data)
+      write.csv(data, file, row.names = FALSE)
+    }
+  )
+
+  # Send data to JS
+  observe({
+    req(numeric_obs_keys())
+    print("Sending numeric vars to JS")
+    session$sendCustomMessage("updateNumericVars", numeric_obs_keys())
+  })
+
+  # Handle variable data requests from JS
+  observeEvent(input$requestVarData, {
+    req(input$requestVarData$var)
+    var_name <- input$requestVarData$var
+    
+    # Fetch data using your function
+    data <- values$lazy_data$get_obs_column(values$lazy_data$z, var_name)
+    
+    # Send to filter.js (for histogram)
+    session$sendCustomMessage("updateVarData", list(
+      var = var_name, 
+      data = data
+    ))
+    
+    # Send to scatterplot.js (for filtering)
+    session$sendCustomMessage("updateNumericData", list(
+      columnName = var_name,
+      values = as.numeric(data)  # Ensure it's numeric
+    ))
+  })
 }
+
+# Clean up plan on app stop
+# onStop(function() {
+#   stopLocalWorkers(queue = "scanpy_jobs")
+#   plan(sequential)
+# })
 
 # shinyApp(ui, server)
 # shinyApp(ui = ui, server = server)

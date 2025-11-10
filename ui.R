@@ -23,7 +23,9 @@ ui <- fluidPage(
   tags$head(
     tags$script(src = "scatterplot.js"),
     tags$script(src = "qc_plots.js"),
+    tags$script(src = "filtering.js"),
     tags$script(src = "https://d3js.org/d3.v7.min.js"),
+    tags$script(src = "https://cdn.jsdelivr.net/npm/chart.js"),
     tags$script(src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'),
     tags$link(rel = "stylesheet", type = "text/css", href = "styles.css"),
     tags$style(HTML("
@@ -148,13 +150,26 @@ ui <- fluidPage(
           span(class = "collapse-icon", "▼")
         ),
         div(id = "dataset-section", class = "collapsible-content",
-          uiOutput("datasetUI"),
-          tags$small(class = "text-muted", 
-            "Select your .h5ad file or use demo data for exploration")
+            # 1. Dataset Selector
+            uiOutput("datasetUI"),
+            
+            # 2. **NEW: Version Selector**
+            uiOutput("versionUI"),
+            
+            tags$small(class = "text-muted", 
+                "Select your .h5ad file or use demo data for exploration"),
+            tags$br(),
+            tags$small(class = "text-muted", 
+                "Select 'Original' or a saved version prefix."),
+            
         ),
         # actionButton("test_capture", "Prepare Download"),
         # downloadButton("download_report", "Download Full Report")
-        uiOutput("download_button_ui")
+        div(
+          style = "display: flex; gap: 10px;",
+          uiOutput("download_button_ui"),
+          uiOutput("save_changes_ui")
+        )
 
       ),
       
@@ -169,7 +184,8 @@ ui <- fluidPage(
             textOutput("status")
           ),
           uiOutput("dataInfo"),
-          uiOutput("selectedInfo")
+          uiOutput("selectedInfo"),
+          uiOutput("screening_stats")
         )
       ),
       
@@ -179,7 +195,7 @@ ui <- fluidPage(
         # Gene Search and Visualization - Collapsible
         div(class = "collapsible-section",
           div(class = "collapsible-header", onclick = "toggleCollapse('gene-section')",
-            span(class = "section-header", "🔬 Gene Expression"),
+            span(class = "section-header", "🔬 UMAP Settings"),
             span(class = "collapse-icon", "▼")
           ),
           div(id = "gene-section", class = "collapsible-content",
@@ -481,43 +497,43 @@ ui <- fluidPage(
       # Tools Tab Controls
       conditionalPanel(
         condition = "input.main_tabs == 'results'",
-        # Gene Set Signature - Collapsible
-        div(class = "collapsible-section",
-          div(class = "collapsible-header", onclick = "toggleCollapse('gene-set-section')",
-            span(class = "section-header", "📊 Gene Set Signature"),
-            span(class = "collapse-icon collapsed", "▼")
-          ),
-          div(id = "gene-set-section", class = "collapsible-content", style = "display: none;",
-            checkboxInput("show_gene_set", 
-              HTML("<strong>Enable Gene Set Analysis</strong>"), FALSE),
-            conditionalPanel(
-              condition = "input.show_gene_set == true",
-              selectizeInput("gene_set_input", "Select Genes:", 
-                choices = NULL, multiple = TRUE,
-                options = list(maxItems = 10, placeholder = "Choose genes...")),
-              actionButton("calc_gene_score", "Calculate Signature", 
-                class = "btn-primary btn-sm")
-            )
-          )
-        ),
+        # # Gene Set Signature - Collapsible
+        # div(class = "collapsible-section",
+        #   div(class = "collapsible-header", onclick = "toggleCollapse('gene-set-section')",
+        #     span(class = "section-header", "📊 Gene Set Signature"),
+        #     span(class = "collapse-icon collapsed", "▼")
+        #   ),
+        #   div(id = "gene-set-section", class = "collapsible-content", style = "display: none;",
+        #     checkboxInput("show_gene_set", 
+        #       HTML("<strong>Enable Gene Set Analysis</strong>"), FALSE),
+        #     conditionalPanel(
+        #       condition = "input.show_gene_set == true",
+        #       selectizeInput("gene_set_input", "Select Genes:", 
+        #         choices = NULL, multiple = TRUE,
+        #         options = list(maxItems = 10, placeholder = "Choose genes...")),
+        #       actionButton("calc_gene_score", "Calculate Signature", 
+        #         class = "btn-primary btn-sm")
+        #     )
+        #   )
+        # ),
         
         # SEACell Toggle - Collapsible
-        div(class = "collapsible-section",
-          div(class = "collapsible-header", onclick = "toggleCollapse('seacell-section')",
-            span(class = "section-header", "🔬 SEACell Metacells"),
-            span(class = "collapse-icon collapsed", "▼")
-          ),
-          div(id = "seacell-section", class = "collapsible-content", style = "display: none;",
-            checkboxInput("show_seacell_toggle", 
-              HTML("<strong>Enable SEACell View</strong>"), FALSE),
-            conditionalPanel(
-              condition = "input.show_seacell_toggle == true",
-              radioButtons("cell_level", "Display Level:", 
-                choices = c("Single Cells" = "single", "SEACells" = "meta"),
-                selected = "single", inline = TRUE)
-            )
-          )
-        ),
+        # div(class = "collapsible-section",
+        #   div(class = "collapsible-header", onclick = "toggleCollapse('seacell-section')",
+        #     span(class = "section-header", "🔬 SEACell Metacells"),
+        #     span(class = "collapse-icon collapsed", "▼")
+        #   ),
+        #   div(id = "seacell-section", class = "collapsible-content", style = "display: none;",
+        #     checkboxInput("show_seacell_toggle", 
+        #       HTML("<strong>Enable SEACell View</strong>"), FALSE),
+        #     conditionalPanel(
+        #       condition = "input.show_seacell_toggle == true",
+        #       radioButtons("cell_level", "Display Level:", 
+        #         choices = c("Single Cells" = "single", "SEACells" = "meta"),
+        #         selected = "single", inline = TRUE)
+        #     )
+        #   )
+        # ),
         
         # Differential Expression - Collapsible
         div(class = "collapsible-section",
@@ -530,10 +546,13 @@ ui <- fluidPage(
               HTML("<strong>Enable DE Analysis</strong>"), FALSE),
             conditionalPanel(
               condition = "input.show_dge == true",
-              selectInput("dge_group_by", "Group by:", 
-                choices = c("Cluster" = "cluster", "Cell Type" = "cell_type")),
-              selectInput("dge_condition_1", "Condition A:", choices = NULL),
-              selectInput("dge_condition_2", "Condition B:", choices = NULL),
+              uiOutput("dge_group_by_ui"),
+              uiOutput("dge_condition_1_ui"),
+              uiOutput("dge_condition_2_ui"),
+              # selectInput("dge_group_by", "Group by:", 
+              #   choices = c("Cluster" = "cluster", "Cell Type" = "cell_type")),
+              # selectInput("dge_condition_1", "Condition A:", choices = NULL),
+              # selectInput("dge_condition_2", "Condition B:", choices = NULL),
               actionButton("run_dge", "Run DE Test", class = "btn-primary btn-sm"),
               tags$small(class = "text-muted", 
                 "Click a gene in results to view violin plot.")
@@ -542,26 +561,26 @@ ui <- fluidPage(
         ),
 
         # Milo Analysis - Collapsible
-        div(class = "collapsible-section",
-          div(class = "collapsible-header", onclick = "toggleCollapse('milo-section')",
-            span(class = "section-header", "📊 Differential Expression with Milo"),
-            span(class = "collapse-icon collapsed", "▼")
-          ),
-          div(id = "milo-section", class = "collapsible-content", style = "display: none;",
-            checkboxInput("show_milo", 
-              HTML("<strong>Enable Milo Analysis</strong>"), FALSE),
-            conditionalPanel(
-              condition = "input.show_milo == true",
-              selectInput("milo_group_by", "Group by:", 
-                choices = c("Cluster", "Cell Type")),
-              selectInput("milo_condition_1", "Condition A:", choices = NULL),
-              selectInput("milo_condition_2", "Condition B:", choices = NULL),
-              actionButton("run_milo", "Run Milo Analysis", class = "btn-primary btn-sm"),
-              tags$small(class = "text-muted", 
-                "Milo requires a pre-computed graph. Ensure you have run the necessary steps.")
-            )
-          )
-        )
+        # div(class = "collapsible-section",
+        #   div(class = "collapsible-header", onclick = "toggleCollapse('milo-section')",
+        #     span(class = "section-header", "📊 Differential Expression with Milo"),
+        #     span(class = "collapse-icon collapsed", "▼")
+        #   ),
+        #   div(id = "milo-section", class = "collapsible-content", style = "display: none;",
+        #     checkboxInput("show_milo", 
+        #       HTML("<strong>Enable Milo Analysis</strong>"), FALSE),
+        #     conditionalPanel(
+        #       condition = "input.show_milo == true",
+        #       selectInput("milo_group_by", "Group by:", 
+        #         choices = c("Cluster", "Cell Type")),
+        #       selectInput("milo_condition_1", "Condition A:", choices = NULL),
+        #       selectInput("milo_condition_2", "Condition B:", choices = NULL),
+        #       actionButton("run_milo", "Run Milo Analysis", class = "btn-primary btn-sm"),
+        #       tags$small(class = "text-muted", 
+        #         "Milo requires a pre-computed graph. Ensure you have run the necessary steps.")
+        #     )
+        #   )
+        # )
       )
     ),
     
@@ -580,6 +599,7 @@ ui <- fluidPage(
           ),
           # Legends container for dynamic legends
           tags$div(id = "legendsContainer", style = "margin-top: 15px;"),
+          tags$div(id = "filterControls"),
           verbatimTextOutput("selected_points")
         ),
 
@@ -619,7 +639,8 @@ ui <- fluidPage(
             br(), br(),
 
             # UMAP for gene sets
-            my_scatterplotOutput("umapPlot", width = "100%", height = "600px")
+            # my_scatterplotOutput("umapPlot", width = "100%", height = "600px")
+            uiOutput("umapPlotContainer")
 
           )
         ),
@@ -782,48 +803,37 @@ ui <- fluidPage(
           div(style = "margin-top: 15px;",
             h3("🧬 Analysis Results"),
             
-            # DE Results
-            conditionalPanel(
-              condition = "input.show_dge == true",
-              div(class = "qc-plot-container",
-                h4("📈 Differential Expression Results"),
-                DT::dataTableOutput("de_results")
+            fluidRow(
+              column(
+                3,
+                selectInput("result_tool", "🧰 Tool:",
+                            choices = c("DGE", "Clustering", "Enrichment"),
+                            selected = "DGE"),
+                tags$script(HTML("
+                  $(document).on('shiny:connected', function() {
+                    $('#result_tool option:not([value=\"DGE\"])').prop('disabled', true);
+                  });
+                "))
+              ),
+              column(7,
+                selectInput("previous_result", "📜 Previous Results:",
+                            choices = NULL, selected = NULL,
+                            width = "100%")
+              ),
+              column(2,
+                # 🆕 Conditionally show button only for cloud datasets
+                uiOutput("save_to_cloud_button_ui")
               )
             ),
             
-            # Gene Set Results  
-            conditionalPanel(
-              condition = "input.show_gene_set == true",
-              div(class = "qc-plot-container",
-                h4("📊 Gene Set Signature Results"),
-                verbatimTextOutput("gene_set_summary")
-              )
-            ),
+            hr(),
             
-            # Milo Results
-            conditionalPanel(
-              condition = "input.show_milo == true",
-              div(class = "qc-plot-container",
-                h4("📊 Milo Analysis Results"), 
-                verbatimTextOutput("milo_results")
-              )
-            ),
-            
-            # Default message when no analysis is active
-            conditionalPanel(
-              condition = "input.show_dge == false && input.show_gene_set == false && input.show_milo == false",
-              div(class = "qc-plot-container text-center",
-                h4("🔬 No Analysis Active"),
-                p("Enable analysis tools in the Visualization tab to see results here."),
-                tags$ul(class = "text-left",
-                  tags$li("Gene Set Signature Analysis"),
-                  tags$li("Differential Expression Analysis"),
-                  tags$li("Milo Differential Abundance Testing")
-                )
-              )
-            )
+            # Main result display area
+            # uiOutput("analysis_display"),
+            uiOutput("analysis_display")
           )
         )
+
       )
     )
   ),

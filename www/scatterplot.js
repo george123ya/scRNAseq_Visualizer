@@ -23,6 +23,8 @@ let geneDataMatrix = null; // Store the full gene expression matrix
 let currentGeneNames = []; // Track current gene names
 let geneDataInfo = null; // Store gene data dimensions and info
 
+let numericFilters = []; // Store active numeric filters
+let numericFilteredIndices = null; // Indices that pass numeric filters
 
 // Updated global variables to handle MAGIC data
 let geneExpressionOriginal = new Map(); // Original gene expression data
@@ -33,11 +35,59 @@ let initScatterplotPromise = null; // Promise to track scatterplot initializatio
 
 let mainAnnotation = null;
 
+let globalPointSize = null; // null = auto, number = manual
+
+
 // Viridis color palette for gene expression
 const viridisColors = [
   '#440154', '#482777', '#3f4a8a', '#31678e', '#26838f', '#1f9d8a', 
   '#6cce5a', '#b6de2b', '#fee825', '#fcce25'
 ];
+
+class ScatterplotManager {
+  constructor() {
+    this.plots = {};
+    this.filteredIndices = null;
+  }
+  
+  filterToIndices(indices) {
+    console.log("Filtering all plots to", indices.length, "cells");
+    this.filteredIndices = indices;
+    
+    // Rebuild all plots with filtered data
+    Object.keys(this.plots).forEach(plotId => {
+      this.updatePlotWithFilter(plotId, indices);
+    });
+  }
+  
+  clearFilter() {
+    console.log("Clearing filter, showing all cells");
+    this.filteredIndices = null;
+    
+    // Restore all plots to full data
+    Object.keys(this.plots).forEach(plotId => {
+      this.restorePlotFullData(plotId);
+    });
+  }
+  
+  updatePlotWithFilter(plotId, indices) {
+    const plot = this.plots[plotId];
+    if (!plot) return;
+    
+    // Create filtered dataset
+    const filteredData = {
+      x: indices.map(i => plot.fullData.x[i]),
+      y: indices.map(i => plot.fullData.y[i]),
+      // ... filter other properties
+    };
+    
+    // Redraw with filtered data
+    plot.draw(filteredData);
+  }
+}
+
+// Initialize global manager
+window.scatterplotManager = new ScatterplotManager();
 
 function createSyncButton() {
   if (document.getElementById('syncButton')) return;
@@ -75,6 +125,246 @@ function createSyncButton() {
   setTimeout(() => {
     toggleSyncMode();  // will set text to Disable + red, and call setupSynchronization()
   }, 0);
+}
+
+// Optimized function to apply numeric filters from filter.js
+window.applyNumericFilters = function(filters) {
+  console.log('Applying numeric filters:', filters);
+  
+  numericFilters = filters;
+  
+  if (!filters || filters.length === 0) {
+    // No filters - show all points
+    numericFilteredIndices = null;
+    console.log('No filters - showing all points');
+    redrawAllPlots(mainAnnotation);
+    return;
+  }
+  
+  console.time('Filter calculation');
+  
+  // Pre-fetch all needed data columns once
+  const filterData = filters.map(filter => ({
+    ...filter,
+    values: window.numericDataCache[filter.col]
+  }));
+  
+  // Check if all data is available
+  const missingData = filterData.filter(f => !f.values);
+  if (missingData.length > 0) {
+    console.error('Missing data for columns:', missingData.map(f => f.col));
+    return;
+  }
+  
+  // Single pass through points
+  numericFilteredIndices = new Set();
+  const numPoints = points.length;
+  
+  for (let i = 0; i < numPoints; i++) {
+    let passesAllFilters = true;
+    
+    // Check all filters for this point
+    for (let j = 0; j < filterData.length; j++) {
+      const filter = filterData[j];
+      const value = filter.values[i];
+      
+      // Skip points with null/undefined values
+      if (value === null || value === undefined || isNaN(value)) {
+        passesAllFilters = false;
+        break;
+      }
+      
+      if (value < filter.minThresh || value > filter.maxThresh) {
+        passesAllFilters = false;
+        break;
+      }
+    }
+    
+    if (passesAllFilters) {
+      numericFilteredIndices.add(i);
+    }
+  }
+  
+  console.timeEnd('Filter calculation');
+  console.log(`Filtered to ${numericFilteredIndices.size} / ${numPoints} points`);
+  
+  // Redraw all plots with filters applied
+  redrawAllPlots(mainAnnotation);
+};
+
+// Helper function to get numeric value for a point
+function getNumericValue(pointIndex, columnName) {
+  if (!window.numericDataCache || !window.numericDataCache[columnName]) {
+    console.warn(`No data cached for column: ${columnName}`);
+    return null;
+  }
+  
+  const value = window.numericDataCache[columnName][pointIndex];
+  
+  if (value === undefined || value === null) {
+    console.warn(`No value at index ${pointIndex} for column ${columnName}`);
+    return null;
+  }
+  
+  return parseFloat(value);
+}
+
+function createPointSizeControl() {
+  // Check if control already exists
+  if (document.getElementById('pointSizeControl')) return;
+
+  const controlsContainer = document.createElement('div');
+  controlsContainer.id = 'pointSizeControl';
+  controlsContainer.style.cssText = `
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    z-index: 1000;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 10px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    font-size: 12px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    min-width: 200px;
+  `;
+
+  controlsContainer.innerHTML = `
+    <div style="margin-bottom: 6px; font-weight: bold;">Point Size</div>
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <input type="range" id="pointSizeSlider" 
+            min="0.5" max="200" step="0.5" value="${globalPointSize || 3}"
+            style="flex: 1; cursor: pointer;">
+      <input type="number" id="pointSizeInput" 
+            min="0.5" max="200" step="0.5" value="${globalPointSize || 3}"
+            style="width: 60px; padding: 2px 4px;">
+      <button id="autoSizeBtn" style="padding: 4px 8px; font-size: 11px;">Auto</button>
+    </div>
+  `;
+
+  // Add auto button handler
+  const autoBtn = controlsContainer.querySelector('#autoSizeBtn');
+  autoBtn.addEventListener('click', async () => {
+    globalPointSize = null;
+    const autoSize = calculateOptimalPointSize(filteredPoints);
+    
+    slider.value = autoSize;
+    input.value = autoSize;
+    
+    // Visual feedback
+    autoBtn.textContent = '✓';
+    autoBtn.style.background = '#4CAF50';
+    setTimeout(() => {
+      autoBtn.textContent = 'Auto';
+      autoBtn.style.background = '';
+    }, 1000);
+    
+    // Apply to plots
+    if (scatterplot && !scatterplot._destroyed) {
+      scatterplot.set({ pointSize: autoSize });
+      await scatterplot.draw(filteredPoints, { transition: false, preventEvent: true });
+    }
+    
+    for (const geneId of Object.keys(genePlots)) {
+      const plot = genePlots[geneId];
+      if (plot && !plot._destroyed) {
+        plot.set({ pointSize: autoSize });
+        await redrawGenePlot(geneId);
+      }
+    }
+    
+    console.log(`✅ Auto: ${autoSize.toFixed(1)}px (${filteredPoints.length} points)`);
+  });
+
+  const slider = controlsContainer.querySelector('#pointSizeSlider');
+  const input = controlsContainer.querySelector('#pointSizeInput');
+
+  // Update function
+  const updatePointSize = async (value) => {
+    const size = parseFloat(value);
+    if (isNaN(size) || size < 0.5 || size > 200) return;
+    
+    globalPointSize = size;
+    slider.value = size;
+    input.value = size;
+    
+    // ⭐ FIX: Only redraw with current filtered data (don't trigger full refresh)
+    if (scatterplot && !scatterplot._destroyed) {
+      scatterplot.set({ pointSize: size });
+      // Use current filteredPoints without triggering filterPoints() again
+      await scatterplot.draw(filteredPoints, { transition: false, preventEvent: true });
+    }
+    
+    // Update gene plots sequentially
+    for (const geneId of Object.keys(genePlots)) {
+      const plot = genePlots[geneId];
+      if (plot && !plot._destroyed) {
+        plot.set({ pointSize: size });
+        await redrawGenePlot(geneId);
+      }
+    }
+  };
+
+  slider.addEventListener('input', (e) => {
+    updatePointSize(e.target.value).catch(err => console.warn('Point size update error:', err));
+  });
+
+  input.addEventListener('change', (e) => {
+    updatePointSize(e.target.value).catch(err => console.warn('Point size update error:', err));
+  });
+
+  // Add to the plot grid container
+  const plotGrid = document.getElementById('plotGrid');
+  if (plotGrid) {
+    plotGrid.style.position = 'relative';
+    plotGrid.appendChild(controlsContainer);
+  }
+}
+
+// ⭐ NEW: Calculate optimal point size based on data density
+function calculateOptimalPointSize(points) {
+  const n = points.length;
+  
+  // Base size from point count
+  let baseSize;
+  if (n < 300) {
+    baseSize = 100;
+  } else if (n < 1000) {
+    baseSize = 50;
+  } else if (n < 5000) {
+    baseSize = 20;
+  } else if (n < 10000) {
+    baseSize = 10;
+  } else if (n < 50000) {
+    baseSize = 5;
+  } else if (n < 200000) {
+    baseSize = 3;
+  } else if (n < 500000) {
+    baseSize = 2;
+  } else {
+    baseSize = 1;
+  }
+  
+  // Adjust for density (if points are spread out, increase size)
+  if (points.length > 100) {
+    const xCoords = points.map(p => p[0]);
+    const yCoords = points.map(p => p[1]);
+    
+    const xRange = Math.max(...xCoords) - Math.min(...xCoords);
+    const yRange = Math.max(...yCoords) - Math.min(...yCoords);
+    
+    const area = xRange * yRange;
+    const pointsPerUnit = n / area;
+    
+    // If density is low (< 100 points per unit area), increase size
+    if (pointsPerUnit < 100) {
+      baseSize *= 1.5;
+    } else if (pointsPerUnit < 500) {
+      baseSize *= 1.2;
+    }
+  }
+  
+  return Math.max(0.5, Math.min(200, baseSize));
 }
 
 
@@ -975,6 +1265,13 @@ function createPlotLegend(plotId, legendData, type = 'categorical') {
         const currentlyVisible = Array.from(visible);
         isUpdatingVisibility = true;
 
+        // ⭐ FIX: Don't allow toggling if numeric filters are active
+        if (numericFilteredIndices && numericFilteredIndices.size > 0) {
+          console.warn("⚠️ Cannot toggle categories while numeric filters are active");
+          isUpdatingVisibility = false;
+          return;
+        }
+
         // Handle visibility toggling (unchanged)
         if (e.shiftKey && lastClicked !== null) {
           const start = Math.min(lastClicked, i);
@@ -1437,7 +1734,7 @@ async function createGenePlot(geneId) {
 
   // Get optimal settings based on point count
   const pointCount = points.length;
-  let pointSize = 3;
+  let pointSize = globalPointSize; // Use global value
   let opacity = 0.8;
   let performanceMode = false;
 
@@ -1450,13 +1747,13 @@ async function createGenePlot(geneId) {
   //   opacity = 0.4;
   // }
 
-  if (pointCount < 300) {
-    pointSize = 100;
-  } else if (pointCount < 50000) {
-    pointSize = 30;
-  } else {
-    pointSize = 3;
-  }
+  // if (pointCount < 300) {
+  //   pointSize = 100;
+  // } else if (pointCount < 50000) {
+  //   pointSize = 30;
+  // } else {
+  //   pointSize = 3;
+  // }
 
   const plot = createScatterplot({
     renderer,
@@ -1865,6 +2162,9 @@ async function initScatterplot() {
   subscribeMainPlotEvents();
   updatePlotLayout();
 
+  // Add point size control
+  createPointSizeControl();  // <- Add this line
+
   initScatterplotPromise = Promise.resolve();
 }
 
@@ -1949,57 +2249,104 @@ function subscribeMainPlotEvents() {
 }
 
 function filterPoints() {
-
-  if (mainAnnotation == null) return points;
+  if (mainAnnotation == null) {
+    return applyNumericFiltering(points);
+  }
 
   if (mainAnnotation.var_type != 'categorical') {
-
     let minVal = Infinity;
     let maxVal = -Infinity;
 
     const pointsColored = points.map((p, i) => {
       const newP = [...p];
       const rawVal = mainAnnotation.annotation[i] - 1;
-
-      // track min and max while building new array
       if (rawVal < minVal) minVal = rawVal;
       if (rawVal > maxVal) maxVal = rawVal;
-
-      newP[2] = rawVal; // temporarily store raw
+      newP[2] = rawVal;
       return newP;
     });
 
     const range = maxVal - minVal || 1;
-
-    // second pass to normalize
     pointsColored.forEach(p => {
       p[2] = (p[2] - minVal) / range;
     });
 
-    return pointsColored;
-
+    return applyNumericFiltering(pointsColored);
   } else {
-
     const pointsColored = points.map((p, i) => {
       const newP = [...p];
-      newP[2] = mainAnnotation.annotation[i] - 1; // match index
+      newP[2] = mainAnnotation.annotation[i] - 1;
       return newP;
     });
 
-    console.log(mainAnnotation);
-  
-  
-    return pointsColored.filter(p => {
+    const filtered = pointsColored.filter(p => {
       const valueIndex = 2 + gene_number;
       const value = p[valueIndex];
       return mainAnnotation.visible.has(value);
     });
-
+    
+    return applyNumericFiltering(filtered);
   }
-  
 }
 
+// Optimized helper function to apply numeric filters
+function applyNumericFiltering(pointsArray) {
+  if (!numericFilteredIndices || numericFilteredIndices.size === 0) {
+    return pointsArray; // No numeric filters active
+  }
+  
+  // Build a fast lookup map from coordinates to original indices
+  const coordToOriginalIdx = new Map();
+  points.forEach((p, idx) => {
+    const key = `${p[0].toFixed(10)},${p[1].toFixed(10)}`;
+    coordToOriginalIdx.set(key, idx);
+  });
+  
+  // Filter using the map (much faster than findIndex)
+  return pointsArray.filter((p) => {
+    const key = `${p[0].toFixed(10)},${p[1].toFixed(10)}`;
+    const originalIdx = coordToOriginalIdx.get(key);
+    return originalIdx !== undefined && numericFilteredIndices.has(originalIdx);
+  });
+}
 
+// Handler to clear all filters when dataset changes
+Shiny.addCustomMessageHandler('clearAllFilters', function(message) {
+  console.log('Clearing all filters due to dataset change');
+  
+  // Clear numeric filters
+  numericFilters = [];
+  numericFilteredIndices = null;
+  
+  // Clear cached numeric data
+  window.numericDataCache = {};
+  
+  // Clear filter UI if it exists
+  if (window.clearFilterUI) {
+    window.clearFilterUI();
+  }
+  
+  console.log('All filters cleared');
+});
+
+// Cache for numeric column data from Shiny
+window.numericDataCache = {};
+
+// Add this with other Shiny handlers (around line 1500)
+// Handler to receive numeric column data for filtering
+Shiny.addCustomMessageHandler('updateNumericData', function(message) {
+  console.log('Received numeric data for column:', message.columnName);
+  console.log('Data length:', message.values.length);
+  console.log('Sample values:', message.values.slice(0, 5));
+  
+  // Store in cache
+  window.numericDataCache[message.columnName] = message.values;
+  
+  // Verify data integrity
+  if (message.values.length !== points.length) {
+    console.warn(`Length mismatch: ${message.values.length} values vs ${points.length} points`);
+  }
+});
 
 async function redrawAllPlots(mainAnnotation=null) {
   if (points.length === 0) return;
@@ -2058,8 +2405,6 @@ async function redrawMainPlot(annotation=null) {
   if (!scatterplot || filteredPoints.length === 0) return;
 
   if (annotation !== null) {
-    // ... your existing color and pointSize setup code ...
-    
     console.log(annotation);
     
     if (annotation.var_type != 'categorical') {
@@ -2068,22 +2413,17 @@ async function redrawMainPlot(annotation=null) {
       colors = annotation.colors;
     }
 
-    if (filteredPoints.length < 300) {
-      pointSize = 100;
-    } else if (filteredPoints.length < 100000) {
-      pointSize = 30;
-    } else {
-      pointSize = 3;
-    }
-    
     console.log(points[10]);
     console.log(filteredPoints[10]);
     
+    // ⭐ FIX: Auto-calculate size if not manually set
+    const autoSize = calculateOptimalPointSize(filteredPoints);
+    const finalSize = globalPointSize === 3 ? autoSize : globalPointSize; // Use auto only if still at default
+
     const config = { 
       colorBy: 'category',
       pointColor: colors,
-      sizeBy: 'category',
-      pointSize: Array(filteredPoints.length).fill(pointSize),
+      pointSize: finalSize,
     };
     
     scatterplot.set(config);
@@ -2135,15 +2475,9 @@ async function redrawMainPlot(annotation=null) {
     }
 
   } else {
-    // Your existing else block code...
-    if (points.length < 300) {
-      pointSize = 100;
-    } else {
-      pointSize = 30;
-    }
-    
     const config = { 
       pointColor: '#000000',
+      pointSize: globalPointSize,  // <- FIXED: Use global value
     };
     
     scatterplot.set(config);
@@ -2427,6 +2761,7 @@ function getColorLimits(geneData, vmaxMode) {
 
 
 // Updated redrawGenePlot function with percentile scaling
+// Updated redrawGenePlot function with NUMERIC FILTERING support
 function redrawGenePlot(geneId) {
   const plot = genePlots[geneId];
   if (!plot) return;
@@ -2441,26 +2776,39 @@ function redrawGenePlot(geneId) {
   const { vmin, vmax } = getColorLimits(geneData, vmaxMode);
   const range = vmax - vmin;
 
-  // 2. Create gene points - handle categorical filtering properly
+  // 2. Create gene points - handle BOTH categorical filtering AND numeric filtering
   const genePoints = [];
 
   if (mainAnnotation && mainAnnotation.var_type === 'categorical') {
     // For categorical filtering, build points from visible categories only
     for (let originalIndex = 0; originalIndex < points.length; originalIndex++) {
+      // ⭐ Check categorical visibility
       const categoryIndex = mainAnnotation.annotation[originalIndex] - 1;
-      if (mainAnnotation.visible.has(categoryIndex)) {
-        const rawVal = geneData.values[originalIndex];
-        const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.001);
-        genePoints.push([
-          points[originalIndex][0], 
-          points[originalIndex][1], 
-          normalized
-        ]);
+      if (!mainAnnotation.visible.has(categoryIndex)) {
+        continue;
       }
+      
+      // ⭐ Check numeric filters
+      if (numericFilteredIndices && !numericFilteredIndices.has(originalIndex)) {
+        continue;
+      }
+      
+      const rawVal = geneData.values[originalIndex];
+      const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.001);
+      genePoints.push([
+        points[originalIndex][0], 
+        points[originalIndex][1], 
+        normalized
+      ]);
     }
   } else {
-    // For non-categorical or no filtering, use all points
+    // For non-categorical or no filtering, apply numeric filters
     for (let i = 0; i < points.length; i++) {
+      // ⭐ Check numeric filters
+      if (numericFilteredIndices && !numericFilteredIndices.has(i)) {
+        continue;
+      }
+      
       const rawVal = geneData.values[i];
       const normalized = Math.min(Math.max((rawVal - vmin) / range, 0.0), 1.001);
       genePoints.push([points[i][0], points[i][1], normalized]);
@@ -2492,6 +2840,7 @@ function redrawGenePlot(geneId) {
     geneName: geneId
   }, 'gene');
 }
+
 
 // Add controls for vmax mode (you can integrate this into your UI)
 function createVmaxControls() {
@@ -2545,6 +2894,290 @@ function setSpinner(visible) {
 // Shiny message handlers
 Shiny.addCustomMessageHandler('showSpinner', function(show) {
   setSpinner(show);
+});
+
+// ADD THIS HANDLER TO scatterplot.js - PUT IT NEAR THE TOP WITH OTHER SHINY HANDLERS
+
+// ⭐ CRITICAL: Handler to receive filtered indices from Shiny backend
+Shiny.addCustomMessageHandler('updateFilteredIndices', function(message) {
+  console.log("\n📥 ===== RECEIVED FILTERED INDICES FROM SHINY =====");
+  console.log({
+    active: message.active,
+    count: message.count,
+    hasIndices: message.filteredIndices !== null,
+    totalPoints: message.totalCount
+  });
+  
+  // Update the global numericFilteredIndices variable
+  if (!message.filteredIndices || message.filteredIndices.length === 0) {
+    console.log("🔄 No filters active - resetting to show all points");
+    numericFilteredIndices = null;
+  } else {
+    // Convert array to Set for fast lookup during filtering
+    numericFilteredIndices = new Set(message.filteredIndices);
+    console.log(`✅ Updated numericFilteredIndices: ${numericFilteredIndices.size} / ${message.totalCount} points pass filter`);
+  }
+  
+  // Calculate new filtered points
+  console.log("🎨 Calculating filtered points...");
+  filteredPoints = filterPoints();
+  console.log(`   Filtered points: ${filteredPoints.length} / ${points.length}`);
+  
+  // Detect point count changes and disable transitions
+  const pointCountChanged = !lastDrawPointCount || lastDrawPointCount !== filteredPoints.length;
+  const shouldUseTransition = useTransition && !pointCountChanged;
+  
+  if (pointCountChanged) {
+    console.log(`⚠️ Point count changed (${lastDrawPointCount} → ${filteredPoints.length}) - disabling transitions`);
+  }
+  
+  // Temporarily override transition setting
+  const originalTransition = useTransition;
+  useTransition = shouldUseTransition;
+  
+  // ⭐ KEY: Redraw both main plot AND gene plots
+  console.log("🎨 Redrawing main plot and all gene plots...");
+  
+  // Redraw main plot
+  redrawMainPlot(mainAnnotation).then(() => {
+    // ⭐ Also redraw ALL active gene plots with the new filter
+    console.log(`🎨 Redrawing ${Object.keys(genePlots).length} gene plots...`);
+    Object.keys(genePlots).forEach(geneId => {
+      try {
+        redrawGenePlot(geneId);
+      } catch (error) {
+        console.warn(`Error redrawing gene plot ${geneId}:`, error);
+      }
+    });
+    
+    lastDrawPointCount = filteredPoints.length;
+    useTransition = originalTransition;
+    console.log(`✅ All plots redrawn - filtered to ${numericFilteredIndices ? numericFilteredIndices.size : 'all'} points`);
+    console.log("====================================================\n");
+  }).catch(error => {
+    console.error("❌ Error redrawing main plot:", error);
+    useTransition = originalTransition;
+  });
+});
+
+// Add a global variable to track last draw point count
+let lastDrawPointCount = null;
+
+// ⭐ ALSO IMPORTANT: Keep the existing applyNumericFilters function for direct calls
+// This is called by filter.js if needed as a backup path
+window.applyNumericFilters = function(filters) {
+  console.log('\n📤 applyNumericFilters called with:', filters);
+  
+  numericFilters = filters;
+  
+  if (!filters || filters.length === 0) {
+    // No filters - show all points
+    numericFilteredIndices = null;
+    console.log('🔄 No filters - showing all points');
+    redrawAllPlots(mainAnnotation).catch(err => console.error('Redraw error:', err));
+    return;
+  }
+  
+  console.time('⏱ Filter calculation');
+  
+  // Pre-fetch all needed data columns once
+  const filterData = filters.map(filter => ({
+    ...filter,
+    values: window.numericDataCache[filter.col]
+  }));
+  
+  // Check if all data is available
+  const missingData = filterData.filter(f => !f.values);
+  if (missingData.length > 0) {
+    console.error('❌ Missing data for columns:', missingData.map(f => f.col));
+    return;
+  }
+  
+  // Single pass through points - CUMULATIVE FILTERING
+  numericFilteredIndices = new Set();
+  const numPoints = points.length;
+  
+  for (let i = 0; i < numPoints; i++) {
+    let passesAllFilters = true;
+    
+    // Check ALL filters for this point (AND logic)
+    for (let j = 0; j < filterData.length; j++) {
+      const filter = filterData[j];
+      const value = filter.values[i];
+      
+      // Skip points with null/undefined values
+      if (value === null || value === undefined || isNaN(value)) {
+        passesAllFilters = false;
+        break;
+      }
+      
+      // Point must pass this filter range
+      if (value < filter.minThresh || value > filter.maxThresh) {
+        passesAllFilters = false;
+        break;
+      }
+    }
+    
+    if (passesAllFilters) {
+      numericFilteredIndices.add(i);
+    }
+  }
+  
+  console.timeEnd('⏱ Filter calculation');
+  console.log(`✅ Filtered to ${numericFilteredIndices.size} / ${numPoints} points (${((numericFilteredIndices.size / numPoints) * 100).toFixed(1)}%)`);
+  
+  // Redraw all plots with filters applied
+  redrawAllPlots(mainAnnotation).catch(err => console.error('Redraw error:', err));
+};
+
+Shiny.addCustomMessageHandler('restoreState', async function(message) {
+  console.log("Restoring saved state:", message);
+  
+  const { visibleCategories, selectedPoints, annotationName } = message;
+  
+  // Handle NULL/reset case - show everything, deselect all
+  if (!visibleCategories && !selectedPoints && !annotationName) {
+    console.log("Resetting to original state - all visible, nothing selected");
+    
+    if (mainAnnotation) {
+      // Reset visibility to show all categories
+      mainAnnotation.visible.clear();
+      mainAnnotation.names.forEach((_, i) => mainAnnotation.visible.add(i));
+      
+      // Update filtered points
+      filteredPoints = filterPoints();
+      
+      // Redraw all plots
+      await redrawAllPlots(mainAnnotation);
+      
+      // Update legend to show all visible
+      const container = document.getElementById('scatterplot_canvas');
+      if (container) {
+        const plotContainer = container.parentElement;
+        if (plotContainer) {
+          const legend = plotContainer.querySelector('.plot-legend');
+          if (legend) {
+            const itemsContainer = legend.querySelector('div:not(.legend-drag-handle):not(.legend-resize-handle):not(:first-child)');
+            if (itemsContainer) {
+              itemsContainer.querySelectorAll('.legend-item').forEach((el) => {
+                el.style.opacity = '1'; // All visible
+              });
+            }
+          }
+        }
+      }
+    }
+    
+    // Deselect all points
+    syncing = true;
+    
+    if (scatterplot && !scatterplot._destroyed) {
+      scatterplot.deselect({ preventEvent: true });
+    }
+    
+    Object.values(genePlots).forEach(plot => {
+      if (plot && !plot._destroyed) {
+        plot.deselect({ preventEvent: true });
+      }
+    });
+    
+    syncing = false;
+    console.log("Reset complete - all categories visible, no selection");
+    return;
+  }
+  
+  // Restore visible categories if provided
+  if (visibleCategories && annotationName && mainAnnotation) {
+    if (mainAnnotation.colorBy === annotationName || mainAnnotation.annotationName === annotationName) {
+      // Update the visible set
+      mainAnnotation.visible.clear();
+      visibleCategories.forEach(idx => mainAnnotation.visible.add(idx));
+      
+      console.log(`Restored visibility for ${annotationName}:`, Array.from(mainAnnotation.visible));
+      
+      // Update filtered points
+      filteredPoints = filterPoints();
+      
+      // Redraw all plots with updated visibility
+      await redrawAllPlots(mainAnnotation);
+      
+      // Update the legend opacity
+      const container = document.getElementById('scatterplot_canvas');
+      if (container) {
+        const plotContainer = container.parentElement;
+        if (plotContainer) {
+          const legend = plotContainer.querySelector('.plot-legend');
+          if (legend) {
+            const itemsContainer = legend.querySelector('div:not(.legend-drag-handle):not(.legend-resize-handle):not(:first-child)');
+            if (itemsContainer) {
+              itemsContainer.querySelectorAll('.legend-item').forEach((el, idx) => {
+                el.style.opacity = mainAnnotation.visible.has(idx) ? '1' : '0.4';
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // Restore selection if provided
+  if (selectedPoints && Array.isArray(selectedPoints) && selectedPoints.length > 0) {
+    console.log(`Restoring selection of ${selectedPoints.length} points`);
+    
+    // Map original indices to filtered indices
+    const eps = 1e-8;
+    const filteredIndices = [];
+    
+    selectedPoints.forEach(originalIdx => {
+      if (originalIdx < points.length) {
+        const targetPoint = points[originalIdx];
+        
+        // Find this point in filteredPoints
+        for (let i = 0; i < filteredPoints.length; i++) {
+          const fp = filteredPoints[i];
+          if (Math.abs(fp[0] - targetPoint[0]) < eps && 
+              Math.abs(fp[1] - targetPoint[1]) < eps) {
+            filteredIndices.push(i);
+            break;
+          }
+        }
+      }
+    });
+    
+    // Apply selection to all plots
+    if (filteredIndices.length > 0) {
+      syncing = true;
+      
+      if (scatterplot && !scatterplot._destroyed) {
+        scatterplot.select(filteredIndices, { preventEvent: true });
+      }
+      
+      Object.values(genePlots).forEach(plot => {
+        if (plot && !plot._destroyed) {
+          plot.select(filteredIndices, { preventEvent: true });
+        }
+      });
+      
+      syncing = false;
+      console.log(`Restored selection: ${filteredIndices.length} visible points`);
+    }
+  } else if (selectedPoints !== undefined && (!Array.isArray(selectedPoints) || selectedPoints.length === 0)) {
+    // Empty array or null - deselect all
+    syncing = true;
+    
+    if (scatterplot && !scatterplot._destroyed) {
+      scatterplot.deselect({ preventEvent: true });
+    }
+    
+    Object.values(genePlots).forEach(plot => {
+      if (plot && !plot._destroyed) {
+        plot.deselect({ preventEvent: true });
+      }
+    });
+    
+    syncing = false;
+    console.log("Deselected all points");
+  }
 });
 
 // Replace your current updateData handler with this version
@@ -2672,12 +3305,21 @@ Shiny.addCustomMessageHandler('updateData', async function(message) {
       opacity = 0.4;
     }
 
+    // Replace the adaptive point size logic with:
     if (scatterplot) {
-      scatterplot.set({ pointSize, opacity, performanceMode });
+      scatterplot.set({ 
+        pointSize: globalPointSize, // Use global value
+        opacity, 
+        performanceMode 
+      });
     }
 
     Object.values(genePlots).forEach(plot => {
-      plot.set({ pointSize, opacity, performanceMode });
+      plot.set({ 
+        pointSize: globalPointSize, // Use global value
+        opacity, 
+        performanceMode 
+      });
     });
 
     initScatterplotPromise = Promise.resolve();
@@ -2767,8 +3409,14 @@ Shiny.addCustomMessageHandler('colorByChange', async function(message) {
     return;
   }
 
-  // Visible set = all indices by default
-  message.visible = new Set(message.names.map((_, i) => i));
+  // Visible set - check if visibility state is provided, otherwise default to all
+  if (message.visibleCategories && Array.isArray(message.visibleCategories)) {
+    message.visible = new Set(message.visibleCategories);
+    console.log("Using provided visibility state:", Array.from(message.visible));
+  } else {
+    message.visible = new Set(message.names.map((_, i) => i));
+    console.log("Using default visibility (all categories)");
+  }
 
   // Remove sync button for non-gene expression modes
   if (!activeGeneExpressions.size) {

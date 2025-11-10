@@ -1,4 +1,12 @@
 proxy:
+  authentication: simple
+  users:
+      - name: jack
+        password: password
+        groups: scientists
+      - name: jeff
+        password: password
+        groups: mathematicians
   specs:
     - id: scRNA-seq Browser
       container-image: scrna-shiny-app

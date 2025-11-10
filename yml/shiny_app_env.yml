@@ -20,7 +20,7 @@ dependencies:
   - r-cowplot
   - r-xml2
   - r-ps
-  - r-future
+  - r-future=1.34.0
   - r-reshape2
   - r-shinywidgets
   - r-cairo
@@ -28,8 +28,17 @@ dependencies:
   - zlib 
   - requests
   - aiohttp
+  - r-arrow
   - pip:
       - anndata==0.12.1
+      - scanpy
       - rpy2
       - xarray
       - dask
+      - flask
+      - fsspec
+      - zarr
+      - pandas
+      - pyarrow
+      - numpy
+      - s3fs

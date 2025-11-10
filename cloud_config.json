@@ -3,6 +3,7 @@
     "https://storage.googleapis.com/scrna-seqbrowser/"
   ],
   "urls": [
-    "https://rubioinformatics.s3.us-east-1.amazonaws.com/Test_zarr/corrected_doublet_decontX_mt_Duo_allergy.zarr"
+    "https://scrnaseq-browser.s3.us-east-2.amazonaws.com/corrected_doublet_decontX_mt_Duo_allergy.zarr",
+    "https://scrnaseq-browser.s3.us-east-2.amazonaws.com/strict_epdsc_annotated_data_csc_full.zarr"
   ]
 }
