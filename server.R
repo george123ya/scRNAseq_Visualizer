@@ -39,9 +39,9 @@ suppressPackageStartupMessages({
   library(reshape2)
   library(rlang)
   library(promises)
-  library(redux)
+  # library(redux)
   library(future)
-  library(future.redis)
+  # library(future.redis)
   library(arrow)
 })
 
@@ -55,9 +55,9 @@ source("modules/utils.R")
 # Configure Python environment for scanpy/anndata
 
 # use_condaenv("sc_rna_env_python2", required = TRUE)
-source_python("./scripts/rank_genes_zarr.py")  # Load ONCE at startup
-use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
-# use_condaenv("shiny_app_env", required = TRUE)
+# source_python("./scripts/rank_genes_zarr.py")  # Load ONCE at startup
+# use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
+use_condaenv("shiny_app_env", required = TRUE)
 
 # Enable direct S3 reads (no fsspec, no Python)
 Sys.setenv(
@@ -5085,7 +5085,8 @@ server <- function(input, output, session) {
     f <- future({
       library(reticulate)
       # use_condaenv("sc_rna_env_python2", required = TRUE)
-      use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
+      # use_condaenv("shiny_app_env", conda = "/opt/conda/bin/conda", required = TRUE)
+      use_condaenv("shiny_app_env", required = TRUE)
       source_python("./scripts/rank_genes_zarr.py")
       
       message("Running fast DGE analysis...")

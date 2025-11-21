@@ -16,22 +16,30 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
 # Load credentials
+# REPLACE your current load_credentials with this:
 def load_credentials():
     cred_file = os.path.join(os.path.dirname(__file__), 'credentials.json')
     if not os.path.exists(cred_file):
-        raise FileNotFoundError("credentials.json not found.")
+        print("Warning: credentials.json not found. Running in anonymous mode (Read-Only likely).")
+        return {} # Return empty dict instead of crashing
     with open(cred_file, 'r') as f:
         return json.load(f)
 
 CREDENTIALS = load_credentials()
 
+# REPLACE your current get_filesystem with this:
 def get_filesystem(credential_id='default'):
     creds = CREDENTIALS.get(credential_id)
-    if not creds:
-        raise ValueError(f"Credential ID {credential_id} not found")
-    return fsspec.filesystem('s3', 
-                           key=creds.get('aws_access_key_id'), 
-                           secret=creds.get('aws_secret_access_key'))
+    
+    # If we have credentials, use them
+    if creds and 'aws_access_key_id' in creds:
+        return fsspec.filesystem('s3', 
+                               key=creds.get('aws_access_key_id'), 
+                               secret=creds.get('aws_secret_access_key'))
+    
+    # If no credentials, try anonymous connection
+    # This works for reading PUBLIC buckets
+    return fsspec.filesystem('s3', anon=True)
 
 def generate_version_prefix(user_id, custom_prefix=None):
     if custom_prefix:
