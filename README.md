@@ -43,8 +43,6 @@ The app uses a Python proxy (`proxy/app.py`) to handle data operations.
   * **Read-Only Mode:** If no credentials are provided, the app works in read-only mode (viewing data works, but saving results/masks is disabled).
   * **Write Mode:** To enable writing data back to the Zarr store, you must provide `proxy/credentials.json`.
 
-**⚠️ Security Note:** Ensure `proxy/credentials.json` is in your `.gitignore`. Never commit real keys to GitHub.
-
 ### Credentials Format (`proxy/credentials.json`)
 
 ```json
